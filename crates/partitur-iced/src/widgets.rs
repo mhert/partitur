@@ -61,6 +61,16 @@
 //! viewer closes it ([`Widgets::close_page`]). A failure or a refused command closes it and the
 //! viewer says why.
 //!
+//! The engine can stop and restart as a whole ([`WidgetHostEvent::EngineLost`]). Then every
+//! view is gone, the viewer's page view included: [`Widgets`] forgets them without closing
+//! them, opens none until the engine is back, and each ready widget shows
+//! [`ENGINE_RESTARTING`] as its pending line, while a failure recorded before stays. Once the
+//! engine is back ([`WidgetHostEvent::EngineBack`]) the next [`sync`] opens every ready widget
+//! of the shown session as if it were new, with a fresh bridge from its stored input and
+//! result, and the viewer's page opens again on the HTML it showed. An engine that stopped
+//! for good ([`WidgetHostEvent::EngineStopped`]) leaves every widget as text with its reason,
+//! and the viewer's page says it, for the rest of the run.
+//!
 //! Every engine command is sent from `update`, never from `view`.
 
 use std::collections::{HashMap, HashSet};
@@ -99,6 +109,21 @@ pub(crate) const LOADING: &str = "Loading widget…";
 
 /// Why a widget restored as loading is not shown.
 pub(crate) const STILL_LOADING: &str = "the widget was still loading when the session closed";
+
+/// What stands in for a widget while the widget engine restarts.
+pub(crate) const ENGINE_RESTARTING: &str = "Restarting the widget engine…";
+
+/// Whether the widget engine runs, as its engine-wide events tell.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Engine {
+    /// It runs, and views open.
+    #[default]
+    Running,
+    /// It stopped unexpectedly and restarts; no view opens until it is back.
+    Restarting,
+    /// It is gone for this run, for the reason given; no view opens again.
+    Stopped(String),
+}
 
 /// What a view of the transcript reports about itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,6 +169,11 @@ pub struct Widgets {
     live: HashMap<SessionId, HashSet<ToolCallId>>,
     /// The viewer's page view, while the viewer shows an agent's HTML page.
     page: Option<View>,
+    /// The HTML of the viewer's page, kept while the viewer shows it, so that it opens again
+    /// when the engine is back.
+    page_html: Option<String>,
+    /// Whether the engine runs.
+    engine: Engine,
     /// The window's scale factor.
     scale: f32,
 }
@@ -158,6 +188,8 @@ impl Default for Widgets {
             failed: HashMap::new(),
             live: HashMap::new(),
             page: None,
+            page_html: None,
+            engine: Engine::Running,
             scale: 1.0,
         }
     }
@@ -221,8 +253,8 @@ impl View {
 
 /// What the transcript shows for a tool call's widget.
 pub(crate) enum Look<'a> {
-    /// A row that says the widget is loading.
-    Pending,
+    /// A row with this line, which says the widget is loading or the engine restarts.
+    Pending(&'static str),
     /// The open view.
     View(&'a View),
     /// The line that says why the widget is not shown.
@@ -245,24 +277,42 @@ impl Widgets {
                     .get(session)
                     .is_some_and(|calls| calls.contains(call));
                 if live {
-                    Look::Pending
+                    Look::Pending(LOADING)
                 } else {
                     Look::Unavailable(STILL_LOADING)
                 }
             }
             WidgetSlot::Failed { error, .. } => Look::Unavailable(error),
-            WidgetSlot::Ready(_) if self.shown.as_ref() != Some(session) => Look::Pending,
-            WidgetSlot::Ready(_) => match (self.failed.get(call), self.views.get(call)) {
-                (Some(error), _) => Look::Unavailable(error),
-                (None, Some(view)) => Look::View(view),
-                (None, None) => Look::Pending,
-            },
+            WidgetSlot::Ready(_) if self.shown.as_ref() != Some(session) => Look::Pending(LOADING),
+            WidgetSlot::Ready(_) => {
+                match (&self.engine, self.failed.get(call), self.views.get(call)) {
+                    (Engine::Stopped(error), _, _) | (_, Some(error), _) => {
+                        Look::Unavailable(error)
+                    }
+                    (_, None, Some(view)) => Look::View(view),
+                    (Engine::Restarting, None, None) => Look::Pending(ENGINE_RESTARTING),
+                    (Engine::Running, None, None) => Look::Pending(LOADING),
+                }
+            }
         }
     }
 
     /// The window's scale factor.
     pub(crate) fn scale(&self) -> f32 {
         self.scale
+    }
+
+    /// Whether the engine restarts, so that no view is open.
+    pub(crate) fn restarting(&self) -> bool {
+        self.engine == Engine::Restarting
+    }
+
+    /// Forgets every view, which the engine lost, without closing it; the HTML of the
+    /// viewer's page is kept to open it again.
+    fn lose(&mut self) {
+        self.views.clear();
+        self.calls.clear();
+        self.page = None;
     }
 
     /// Forgets the widgets of `sessions`, which left the tree, that a live update reported as
@@ -314,8 +364,9 @@ impl Widgets {
     }
 
     /// Opens the viewer's page view on the agent's page `html`, in `theme`, under the page's
-    /// content security policy ([`PAGE_POLICY`]), after closing the one before. Returns the view, or why the
-    /// engine refused to open it.
+    /// content security policy ([`PAGE_POLICY`]), after closing the one before. Returns the
+    /// view, or why the engine refused to open it or is gone. While the engine restarts the
+    /// view is named but opens only when the engine is back.
     pub(crate) fn open_page(
         &mut self,
         host: &dyn WidgetHost,
@@ -323,20 +374,31 @@ impl Widgets {
         theme: WidgetTheme,
     ) -> Result<ViewId, String> {
         self.close_page(host);
+        if let Engine::Stopped(error) = &self.engine {
+            return Err(error.clone());
+        }
         let id = ViewId(self.next);
         self.next = self.next.saturating_add(1);
+        self.page_html = Some(html.to_owned());
+        if self.engine == Engine::Restarting {
+            return Ok(id);
+        }
         let page = WidgetPage {
             html: html.to_owned(),
             csp: PAGE_POLICY.to_owned(),
             theme,
         };
-        host.open(id, page).map_err(|error| error.to_string())?;
+        if let Err(error) = host.open(id, page) {
+            self.page_html = None;
+            return Err(error.to_string());
+        }
         self.page = Some(View::new(id, None, None));
         Ok(id)
     }
 
-    /// Closes the viewer's page view, if it is open.
+    /// Closes the viewer's page view, if it is open, and forgets its HTML.
     pub(crate) fn close_page(&mut self, host: &dyn WidgetHost) {
+        self.page_html = None;
         if let Some(page) = self.page.take()
             && let Err(error) = host.close(page.id)
         {
@@ -561,7 +623,7 @@ pub(crate) fn sync(
         widgets.failed.clear();
         widgets.shown = shown;
     }
-    let Some(model) = model else {
+    let Some(model) = model.filter(|_| widgets.engine == Engine::Running) else {
         return;
     };
     let theme = theme_of(mode);
@@ -650,7 +712,10 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
 /// Applies what the engine reported: a frame becomes the one its view shows, the pointer's look
 /// becomes the view's, a message from the page goes to its bridge, a link the user followed
 /// in the page opens like one the page asks for, and a failure makes the widget fall back to
-/// text. Returns the tasks that open the links. Reports of views that are closed are ignored.
+/// text. A lost engine forgets every view, one back has the viewer's page open again (the
+/// transcript's views open with the next [`sync`]), and a stopped one leaves every widget and
+/// the viewer's page as text. Returns the tasks that open the links. Reports of views that are
+/// closed are ignored.
 fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
@@ -709,7 +774,43 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
             }
             Task::none()
         }
+        WidgetHostEvent::EngineLost => {
+            tracing::warn!("the widget engine stopped; it restarts");
+            widgets.lose();
+            widgets.engine = Engine::Restarting;
+            Task::none()
+        }
+        WidgetHostEvent::EngineBack => {
+            tracing::info!("the widget engine runs again");
+            widgets.engine = Engine::Running;
+            reopen_page(state);
+            Task::none()
+        }
+        WidgetHostEvent::EngineStopped { error } => {
+            widgets.lose();
+            widgets.engine = Engine::Stopped(error.clone());
+            fail_page(state, &error);
+            Task::none()
+        }
     }
+}
+
+/// Opens the viewer's page view again on the HTML it showed, once the engine is back; a
+/// refusal says why in its place.
+fn reopen_page(state: &mut State) {
+    let Some(html) = state.widgets.page_html.clone() else {
+        return;
+    };
+    if state.widgets.page.is_some() || !matches!(state.viewer, Some(Viewer::Page(_))) {
+        return;
+    }
+    let opened = state
+        .widgets
+        .open_page(state.widget_host.as_ref(), &html, theme_of(state.mode));
+    state.viewer = Some(match opened {
+        Ok(view) => Viewer::Page(view),
+        Err(error) => Viewer::Failed(format!("cannot show the drawing: {error}")),
+    });
 }
 
 /// The tasks that open `links` with the shown session's link opener; when it cannot be read,

@@ -86,7 +86,7 @@ pub(super) fn below<'a>(
         return None;
     };
     Some(match widgets.look(session, call, slot) {
-        Look::Pending => entries::panel(pending(Length::Shrink)),
+        Look::Pending(line) => entries::panel(pending(line, Length::Shrink)),
         Look::Unavailable(error) => container(
             text(format!("Widget unavailable: {error}"))
                 .size(theme::SMALL)
@@ -98,9 +98,10 @@ pub(super) fn below<'a>(
     })
 }
 
-/// The words that say the widget is loading, `height` tall, for the inside of its frame.
-fn pending<'a>(height: Length) -> Element<'a, Message> {
-    container(text(LOADING).size(theme::SMALL).style(style::muted))
+/// The words `line` that say the widget is loading, or why it waits, `height` tall, for the
+/// inside of its frame.
+fn pending<'a>(line: &'static str, height: Length) -> Element<'a, Message> {
+    container(text(line).size(theme::SMALL).style(style::muted))
         .width(Length::Fill)
         .height(height)
         .center_y(height)
@@ -115,7 +116,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
     let at = view.id;
     let content = match &view.frame {
         Some(frame) => surface(view, frame, scale, height),
-        None => pending(height),
+        None => pending(LOADING, height),
     };
     let message = move |message| Message::WidgetView(at, message);
     // Without `on_show` a sensor reports every size it is laid out at, wherever it is.

@@ -14,6 +14,11 @@
 //! `prefers-color-scheme` media feature, so a plain page that knows nothing of the MCP Apps
 //! bridge follows the desktop all the same.
 //!
+//! A host whose engine runs out of process reports [`WidgetHostEvent::EngineLost`] when that
+//! process goes, then [`WidgetHostEvent::EngineBack`] once a new one runs, or
+//! [`WidgetHostEvent::EngineStopped`] when it gives up for the rest of the run. Views opened
+//! before `EngineLost` are gone: they need not be closed, and their events never come.
+//!
 //! An engine paints a view as often as its page changes, which may be faster than the UI takes
 //! the pictures. So a view's pictures pass through one [`LatestFrame`]. It holds the view's
 //! whole [`Picture`] as the engine paints it, in BGRA with premultiplied alpha, and the
@@ -503,6 +508,16 @@ pub enum WidgetHostEvent {
         /// The view that failed.
         view: ViewId,
         /// What went wrong.
+        error: String,
+    },
+    /// The engine stopped unexpectedly and restarts: every view is gone, and none may be
+    /// opened until [`WidgetHostEvent::EngineBack`].
+    EngineLost,
+    /// The engine runs again after [`WidgetHostEvent::EngineLost`]; views may be opened.
+    EngineBack,
+    /// The engine is gone for the rest of this run, and no view will open.
+    EngineStopped {
+        /// Why it is gone.
         error: String,
     },
 }

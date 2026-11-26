@@ -24,6 +24,9 @@
 //! page, keys do not. An engine that refuses the page, or fails it later, makes the viewer say
 //! `cannot show the drawing: <reason>`. Whatever the viewer shows next, and closing it, closes
 //! the page view.
+//! While the widget engine restarts, the page shows `Restarting the widget engine…` and opens
+//! again on its HTML once the engine is back; an engine gone for good makes the viewer say
+//! `cannot show the drawing: <reason>`.
 //!
 //! Escape or a click beside the content closes the viewer, a click on the content does not,
 //! and no other key reaches the window while it is open.
@@ -298,8 +301,13 @@ pub(crate) fn view<'a>(
 ) -> Element<'a, Message> {
     let (content, padding): (Element<'a, Message>, Padding) = match viewer {
         Viewer::Page(view) => {
+            let line = if widgets.restarting() {
+                widgets::ENGINE_RESTARTING
+            } else {
+                "loading…"
+            };
             let loading = || {
-                container(text("loading…").style(style::muted))
+                container(text(line).style(style::muted))
                     .center(Length::Fill)
                     .into()
             };

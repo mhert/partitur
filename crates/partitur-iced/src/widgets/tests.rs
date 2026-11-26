@@ -2047,3 +2047,238 @@ fn a_page_the_engine_fails_says_why() {
     assert!(matches!(&fixture.state.viewer, Some(Viewer::Failed(reason))
         if reason.starts_with("cannot show the drawing: ")));
 }
+
+/// The pages the engine was asked to open, with their views.
+fn opens(host: &RecordingWidgetHost) -> Vec<(ViewId, String)> {
+    host.calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            WidgetCall::Open { view, page } => Some((view, page.html)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn engine(state: &mut State, event: WidgetHostEvent) {
+    let _task = deliver_widget(state, event);
+}
+
+fn stopped(error: &str) -> WidgetHostEvent {
+    WidgetHostEvent::EngineStopped {
+        error: error.into(),
+    }
+}
+
+#[test]
+fn a_lost_engine_forgets_every_view_without_closing_it() {
+    let (mut fixture, view_id) = with_widget();
+    assert_eq!(opens(&fixture.host), [(view_id, widget().html)]);
+    let calls = fixture.host.calls().len();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+
+    assert!(fixture.state.widgets.views.is_empty());
+    assert!(fixture.state.widgets.calls.is_empty());
+    let slot = WidgetSlot::Ready(widget());
+    assert!(matches!(
+        fixture
+            .state
+            .widgets
+            .look(&fixture.session, &call_id(), &slot),
+        Look::Pending(ENGINE_RESTARTING)
+    ));
+    simulator(view(&fixture.state))
+        .find(ENGINE_RESTARTING)
+        .unwrap();
+    let _task = update(&mut fixture.state, Message::Tick);
+    assert_eq!(fixture.host.calls().len(), calls);
+    // Events of the view that is gone change nothing.
+    let _task = page_says(&mut fixture.state, view_id, INITIALIZE);
+    assert_eq!(fixture.host.calls().len(), calls);
+}
+
+#[test]
+fn widgets_come_back_with_fresh_bridges_when_the_engine_is_back() {
+    let (mut fixture, first) = with_widget();
+    let session = fixture.session.clone();
+    report(&mut fixture.state, &session, result_arrives());
+    let _task = page_says(&mut fixture.state, first, INITIALIZED);
+    assert_eq!(posted(&fixture.host, first).len(), 2);
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let _task = update(&mut fixture.state, Message::Tick);
+
+    let opens = opens(&fixture.host);
+    assert_eq!(opens.len(), 2);
+    let (second, html) = opens[1].clone();
+    assert_ne!(second, first);
+    assert_eq!(html, widget().html);
+    let _task = page_says(&mut fixture.state, second, INITIALIZED);
+    let posts = posted(&fixture.host, second);
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0]["method"], "ui/notifications/tool-input");
+    assert_eq!(posts[0]["params"]["arguments"]["issueKey"], "PROJ-1");
+    assert_eq!(posts[1]["method"], "ui/notifications/tool-result");
+    assert_eq!(posts[1]["params"]["content"][0]["text"], "PROJ-1 is open");
+}
+
+#[test]
+fn a_session_shown_while_the_engine_restarts_opens_its_widgets_when_it_is_back() {
+    let (mut fixture, _first) = with_widget();
+    let project = fixture.state.app.tree().projects[0].id.clone();
+    let _other = fixture
+        .state
+        .app
+        .new_session(project, partitur_core::Scope::Project)
+        .unwrap();
+    let _task = update(&mut fixture.state, Message::Tick);
+    let before = opens(&fixture.host).len();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    let session = fixture.session.clone();
+    fixture.state.app.select_session(session).unwrap();
+    let _task = update(&mut fixture.state, Message::Tick);
+    assert_eq!(opens(&fixture.host).len(), before);
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let _task = update(&mut fixture.state, Message::Tick);
+    assert_eq!(opens(&fixture.host).len(), before + 1);
+    assert!(
+        fixture
+            .state
+            .widgets
+            .view(&fixture.session, &call_id())
+            .is_some()
+    );
+}
+
+#[test]
+fn a_stopped_engine_leaves_every_widget_as_text_with_its_reason() {
+    let (mut fixture, _view) = with_widget();
+    let calls = fixture.host.calls().len();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    engine(
+        &mut fixture.state,
+        stopped("the widget engine crashed twice"),
+    );
+
+    let slot = WidgetSlot::Ready(widget());
+    assert!(matches!(
+        fixture
+            .state
+            .widgets
+            .look(&fixture.session, &call_id(), &slot),
+        Look::Unavailable("the widget engine crashed twice")
+    ));
+    simulator(view(&fixture.state))
+        .find(unavailable("the widget engine crashed twice").as_str())
+        .unwrap();
+    let _task = update(&mut fixture.state, Message::Tick);
+    assert_eq!(fixture.host.calls().len(), calls);
+    // Nor does a page open in the viewer.
+    let _task = update(
+        &mut fixture.state,
+        Message::Show(Shown::Html("<p>hi</p>".into())),
+    );
+    assert_eq!(fixture.host.calls().len(), calls);
+    assert!(matches!(&fixture.state.viewer, Some(Viewer::Failed(reason))
+        if reason == "cannot show the drawing: the widget engine crashed twice"));
+}
+
+#[test]
+fn the_viewers_page_comes_back_with_the_engine() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let first = page_shown(&mut fixture, "<p>hi</p>");
+    assert_eq!(opens(&fixture.host), [(first, "<p>hi</p>".to_owned())]);
+    let calls = fixture.host.calls().len();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    assert!(fixture.state.widgets.page().is_none());
+    assert_eq!(fixture.host.calls().len(), calls);
+    simulator(view(&fixture.state))
+        .find(ENGINE_RESTARTING)
+        .unwrap();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let opens = opens(&fixture.host);
+    assert_eq!(opens.len(), 2);
+    let (second, html) = opens[1].clone();
+    assert_ne!(second, first);
+    assert_eq!(html, "<p>hi</p>");
+    assert!(matches!(fixture.state.viewer, Some(Viewer::Page(view)) if view == second));
+    assert_eq!(fixture.state.widgets.page().unwrap().id, second);
+}
+
+#[test]
+fn a_page_shown_while_the_engine_restarts_opens_when_it_is_back() {
+    let mut fixture = plain_on(MemoryStore::new());
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    let _task = update(
+        &mut fixture.state,
+        Message::Show(Shown::Html("<p>hi</p>".into())),
+    );
+    assert!(opens(&fixture.host).is_empty());
+    simulator(view(&fixture.state))
+        .find(ENGINE_RESTARTING)
+        .unwrap();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let opened = opens(&fixture.host);
+    assert_eq!(opened.len(), 1);
+    let (view_id, _) = opened[0].clone();
+    assert!(matches!(fixture.state.viewer, Some(Viewer::Page(view)) if view == view_id));
+
+    // A page closed while the engine restarts stays closed.
+    let _task = update(&mut fixture.state, Message::CloseViewer);
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    assert_eq!(opens(&fixture.host).len(), 1);
+}
+
+#[test]
+fn the_viewers_page_fails_when_the_engine_stops() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let _view = page_shown(&mut fixture, "<p>hi</p>");
+    let calls = fixture.host.calls().len();
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    engine(
+        &mut fixture.state,
+        stopped("the widget engine crashed twice"),
+    );
+
+    assert!(matches!(&fixture.state.viewer, Some(Viewer::Failed(reason))
+        if reason == "cannot show the drawing: the widget engine crashed twice"));
+    assert!(fixture.state.widgets.page().is_none());
+    // Nothing was closed: the engine is gone.
+    assert_eq!(fixture.host.calls().len(), calls);
+}
+
+#[test]
+fn failures_recorded_before_the_engine_was_lost_stay() {
+    let mut fixture = on_screen();
+    let session = fixture.session.clone();
+    fixture.host.fail_next_call();
+    report(
+        &mut fixture.state,
+        &session,
+        call(WidgetSlot::Ready(widget())),
+    );
+    let refused = "widget host unavailable: recording widget host";
+
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    let slot = WidgetSlot::Ready(widget());
+    assert!(matches!(
+        fixture.state.widgets.look(&session, &call_id(), &slot),
+        Look::Unavailable(error) if error == refused
+    ));
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let _task = update(&mut fixture.state, Message::Tick);
+
+    assert_eq!(fixture.host.calls().len(), 1);
+    simulator(view(&fixture.state))
+        .find(unavailable(refused).as_str())
+        .unwrap();
+}

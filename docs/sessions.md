@@ -304,6 +304,11 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   Partitur. When it cannot start, every widget falls back this way with `widget host
   unavailable: widgets are not available`. On macOS it is not supported yet, so there every
   widget falls back.
+- When the widget engine stops unexpectedly, each widget says `Restarting the widget engine…`
+  in its frame, and so does an open HTML drawing, then reloads from the start once the engine
+  runs again. If it stops again, every widget shows its tool call's text with the reason
+  (`Widget unavailable: <reason>`), and an HTML drawing says `cannot show the drawing:
+  <reason>`, until Partitur restarts.
 - Chromium runs its widget processes in the operating system's sandbox where it can. On Linux
   Partitur first checks that the sandbox starts, and without it Chromium runs unsandboxed and
   Partitur's log says why (`CEF runs without the process sandbox: …`). On Windows Chromium

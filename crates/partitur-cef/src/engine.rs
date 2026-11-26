@@ -166,7 +166,10 @@ fn run_probe_process() -> i32 {
             Ok(
                 WidgetHostEvent::Frame { .. }
                 | WidgetHostEvent::Cursor { .. }
-                | WidgetHostEvent::OpenLink { .. },
+                | WidgetHostEvent::OpenLink { .. }
+                | WidgetHostEvent::EngineLost
+                | WidgetHostEvent::EngineBack
+                | WidgetHostEvent::EngineStopped { .. },
             ) => {} // coverage: runs in the sandbox probe process
             Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)), // coverage: runs in the sandbox probe process
         } // coverage: runs in the sandbox probe process

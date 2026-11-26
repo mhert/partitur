@@ -219,6 +219,9 @@ fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>,
         WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
         WidgetHostEvent::OpenLink { view, url } => Some(Seen::OpenLink { view, url }),
         WidgetHostEvent::Failed { view, error } => Some(Seen::Failed { view, error }),
+        WidgetHostEvent::EngineLost
+        | WidgetHostEvent::EngineBack
+        | WidgetHostEvent::EngineStopped { .. } => None,
     })
 }
 
