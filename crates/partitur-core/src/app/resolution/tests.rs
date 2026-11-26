@@ -323,7 +323,7 @@ fn a_rejection_while_resolving_is_sent() {
 }
 
 #[test]
-fn a_request_that_lapsed_with_its_turn_takes_no_decision() {
+fn a_request_still_resolving_at_the_turn_end_is_decided_afterwards() {
     let (mut family, worktree) = mid_turn();
     let parent = family.parent.clone();
     let fixture = &mut family.fixture;
@@ -338,9 +338,11 @@ fn a_request_that_lapsed_with_its_turn_takes_no_decision() {
         &parent,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
+    assert!(responses(fixture).is_empty());
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
     answer_files(fixture);
 
-    assert!(responses(fixture).is_empty());
+    assert_eq!(responses(fixture), [allowed(&parent)]);
     assert!(!fixture.app.has_waiting_permission(&parent));
     assert_eq!(status(&fixture.app, &parent), Status::Done);
 }

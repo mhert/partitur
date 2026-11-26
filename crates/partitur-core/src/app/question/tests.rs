@@ -16,8 +16,13 @@ use crate::Role;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::select;
 use crate::app::test_support::{Guarded, app_and_files_on, app_on};
-use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
-use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
+use crate::backend::{
+    AgentUpdate, BackendEvent, PermissionKind, PermissionOption, PromptContent, StopReason,
+    ToolKind,
+};
+use crate::ids::{
+    BackendSessionId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, ToolCallId,
+};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
 use crate::session::Scope;
 use crate::store::Store as _;
@@ -295,6 +300,46 @@ fn a_turn_ending_with_a_question_open_waits_for_you() {
     end_turn(&mut fixture, &session);
 
     assert_eq!(status(&fixture, &session), Status::WaitingForYou);
+}
+
+#[test]
+fn an_answered_permission_after_the_turn_keeps_waiting_for_an_open_question() {
+    let mut fixture = fixture();
+    let session = plain(&mut fixture);
+    select(&mut fixture.app, &fixture.store, session.clone());
+    fixture.app.submit_prompt("start").unwrap();
+    ask(&mut fixture, &session, &["a", "b"]);
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-1"),
+            title: "Edit main.rs".into(),
+            kind: ToolKind::Edit,
+            options: vec![PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            name: None,
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    );
+    end_turn(&mut fixture, &session);
+
+    fixture
+        .app
+        .answer_permission(
+            session.clone(),
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow")),
+        )
+        .unwrap();
+
+    assert_eq!(status(&fixture, &session), Status::WaitingForYou);
+    assert!(fixture.app.question_open(&session));
 }
 
 #[test]

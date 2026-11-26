@@ -2,8 +2,9 @@
 //! place. A [`LiveSession`] holds one session's transcript as far as it is loaded, the options its backend
 //! offers, whether it is attached, the prompts waiting for it, who started its turn, its
 //! background tasks, the prompts Partitur deferred for it, its unanswered option changes, its
-//! undecided proposals, its latest git reading, its delete sheet and the files its first
-//! prompt and its Env tab draw on. A session without an
+//! undecided proposals, its latest git reading, its delete sheet, the files its first
+//! prompt and its Env tab draw on and the status it returns to once its permission requests
+//! are answered. A session without an
 //! entry has none of these: each field's empty value means the same as no entry.
 //!
 //! The permission requests waiting for an answer and the unanswered backend requests are
@@ -44,6 +45,7 @@ use crate::ids::{
 };
 use crate::orchestrator::PathCheck;
 use crate::record::TranscriptRecord;
+use crate::session::Status;
 use crate::store::{LoadId, StoreCommand, StoreError};
 use crate::tool_call::ToolCall;
 use crate::transcript::Transcript;
@@ -137,6 +139,12 @@ pub(super) struct LiveSession {
     pub(super) context: Option<SessionContext>,
     /// The read of the context on its way; only its answer is taken.
     pub(super) context_read: Option<ContextRead>,
+    /// The status the session takes once none of its permission requests waits: the one its
+    /// turn's end gave it, or the one it had when a request arrived outside a turn. `None`
+    /// means [`Running`](Status::Running), for requests inside a running turn, and
+    /// every status that starts a turn forgets it. Kept in memory only: no request outlives
+    /// the agent's process.
+    pub(super) after_permissions: Option<Status>,
 }
 
 impl LiveState for HashMap<SessionId, LiveSession> {

@@ -1477,9 +1477,11 @@ impl App {
 
     /// Answers a permission request with `option`, or cancels it with `None`.
     ///
-    /// The answer goes into the transcript, and the session runs again once none of its
-    /// requests is waiting. A request that is not waiting (already answered, settled by the
-    /// end of its turn, or unknown) is ignored, and so is any answer but a rejection or a
+    /// The answer goes into the transcript, and once none of its requests is waiting the
+    /// session takes the status it had without them: it runs again when they came inside a
+    /// running turn, and otherwise goes back to the status its turn's end gave it or it had
+    /// when they arrived outside a turn. A request that is not waiting (already answered,
+    /// settled by the end of its turn, or unknown) is ignored, and so is any answer but a rejection or a
     /// cancel to a request whose paths are still being resolved: nothing is granted before
     /// Partitur has decided the request.
     ///
@@ -1522,7 +1524,11 @@ impl App {
         if self.permissions.any_of(&session) {
             return Ok(());
         }
-        self.set_status(session, Status::Running)
+        let status = self
+            .live_mut(&session)
+            .and_then(|live| live.after_permissions.take())
+            .unwrap_or(Status::Running);
+        self.set_status(session, status)
     }
 
     /// The permission requests of `session` whose paths are still being resolved, oldest
@@ -1543,7 +1549,8 @@ impl App {
     /// user, oldest first by the order they arrived in, each with the child's repository, the
     /// request's title and its options. Answering one with
     /// [`answer_permission`](Self::answer_permission) for the child, here or in the child's
-    /// own session, takes it off the list; so does the end of the child's turn.
+    /// own session, takes it off the list; so does a cancelled or failed end of the child's
+    /// turn.
     pub fn child_permissions(&self, orchestrator: &SessionId) -> Vec<ChildPermission> {
         self.permissions
             .asked
@@ -2231,8 +2238,15 @@ impl App {
         Ok(())
     }
 
-    /// Sets the session's status and stamps its last activity with the current time.
+    /// Sets the session's status and stamps its last activity with the current time. A
+    /// session that runs is in a turn, so it forgets the status it would return to once its
+    /// permission requests are answered: they now belong to the running turn.
     fn set_status(&mut self, id: SessionId, status: Status) -> Result<(), AppError> {
+        if status == Status::Running
+            && let Some(live) = self.live_mut(&id)
+        {
+            live.after_permissions = None;
+        }
         let now = self.clock.now();
         self.change_session(id, |session| {
             session.status = status;
@@ -2651,7 +2665,10 @@ impl App {
     /// Records the request `permission` for `call`, offering `options`, and answers it as
     /// [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user. An
     /// orchestrator's read or edit naming paths waits for the files port to resolve them
-    /// first, as [`resolve_paths`](Self::resolve_paths) describes.
+    /// first, as [`resolve_paths`](Self::resolve_paths) describes. A request that arrives
+    /// outside a turn (a subagent's, after its parent's turn ended) remembers the session's
+    /// status, unless an earlier request or the turn's end already did: the session goes back
+    /// to it once its requests are answered.
     fn permission_requested(
         &mut self,
         session: &SessionId,
@@ -2659,6 +2676,12 @@ impl App {
         call: PermissionCall,
         options: Vec<PermissionOption>,
     ) -> Result<(), AppError> {
+        if !self.in_turn(session)? {
+            let status = self.session(session)?.status;
+            self.live_entry(session)
+                .after_permissions
+                .get_or_insert(status);
+        }
         if call.partitur_tool
             && let Some(option) = allowing_option(&options)
         {
@@ -2757,9 +2780,8 @@ impl App {
             .collect()
     }
 
-    /// Ends the session's turn with `status`: its unanswered permission requests lapse, a
-    /// child reports `outcome` to its parent, and the next prompt Partitur deferred for the
-    /// session goes out. A cancelled turn reports too but sends nothing: a stopped session
+    /// Ends the session's turn with `status`: a child reports `outcome` to its parent, and
+    /// the next prompt Partitur deferred for the session goes out. A cancelled turn reports too but sends nothing: a stopped session
     /// stays quiet until the user prompts it, and its queue moves on when a later turn ends
     /// otherwise. A session that would be [`Done`](Status::Done) with an undecided proposal
     /// is [`WaitingForYou`](Status::WaitingForYou) instead: it waits for the decision, but its
@@ -2769,6 +2791,12 @@ impl App {
     /// [`Done`](Status::Done) with a gate or a question open waits for you the same way, until
     /// the user approves the gate, answers the question or prompts it. A turn the agent
     /// started on its own ends the same way and reports to the parent as started by the agent.
+    ///
+    /// Its unanswered permission requests outlast a turn that ended normally, since the agent
+    /// (or a subagent of it) still waits for the answers: the session then waits for you, and
+    /// takes the status the end gave it once they are answered. A cancelled turn cancels
+    /// them with the agent, and a failed one lapses them, since the agent can no longer
+    /// receive answers; a cancel the backend refuses lapses as well.
     fn end_turn(
         &mut self,
         session: &SessionId,
@@ -2783,15 +2811,36 @@ impl App {
         } else {
             status
         };
-        self.lapse_permissions(session)?;
-        self.set_status(session.clone(), status)?;
+        match outcome {
+            ChildOutcome::Ended(StopReason::Cancelled) => {
+                for (permission, _) in self.waiting_permissions(session) {
+                    // A cancel the backend refuses lapses below with the requests it leaves.
+                    let _ = self.answer_permission(session.clone(), permission, None);
+                }
+                self.lapse_permissions(session)?;
+            }
+            ChildOutcome::Ended(_) => {}
+            ChildOutcome::Failed(_) => self.lapse_permissions(session)?,
+        }
+        let shown = if self.permissions.any_of(session) {
+            self.live_entry(session).after_permissions = Some(status);
+            Status::WaitingForYou
+        } else {
+            status
+        };
+        self.set_status(session.clone(), shown)?;
         let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
         self.settle_turn(session, outcome, drain)
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and
     /// the store, without telling the backend: the agent can no longer receive the answers.
+    /// The status the session would have returned to once they were answered is forgotten;
+    /// the caller sets the one it takes.
     fn lapse_permissions(&mut self, session: &SessionId) -> Result<(), AppError> {
+        if let Some(live) = self.live_mut(session) {
+            live.after_permissions = None;
+        }
         for (permission, _) in self.waiting_permissions(session) {
             self.permissions
                 .waiting

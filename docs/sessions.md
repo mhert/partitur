@@ -344,6 +344,21 @@ which a session has where widgets run, and goes on without waiting. Nothing come
 - A drawing may hold up to 2 MB of markup. An empty or a larger one is refused and the agent
   is told why.
 
+## Permission requests
+
+A session that asks you to allow a tool call shows `waiting for you` until you answer.
+
+- A request still open when the agent's turn ends stays open, and the session keeps waiting
+  for you. A request that arrives after the turn ended, as a subagent's can, makes the
+  session wait for you too.
+- Once every open request is answered, the session goes back to the status it had: `done`,
+  or `waiting for you` while a proposal, a [workflow gate](workflows.md#gates) or a
+  [question](#questions) is still open. A request answered inside a running turn lets the
+  session run on.
+- `Stop` cancels the open requests. A turn the agent ends as cancelled cancels them too, so a
+  subagent still waiting on one goes on; a turn that fails drops them, since the agent can no
+  longer receive an answer.
+
 ## Interrupted sessions
 
 When Partitur closes while a session runs or waits for you to answer a permission request,
@@ -431,7 +446,8 @@ with these differences:
   sent back to the orchestrator, which is the child's last message when its turn ended.
 - In a plain session opencode asks before a subagent starts. What the subagent then does is
   not shown, but its permission requests are asked in the session that started it, also after
-  that session's turn has ended.
+  that session's turn has ended: the session then waits for you until you answer, and goes
+  back to its status after that (see [Permission requests](#permission-requests)).
 - Rejecting a permission ends opencode's turn as cancelled; that is opencode's own way. A
   rejected Code Mode `execute` is the exception: the model sees it as a failed call and goes on.
 - While opencode retries a model it cannot reach, the session shows a notice for each attempt,

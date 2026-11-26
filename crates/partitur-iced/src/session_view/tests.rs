@@ -2963,10 +2963,11 @@ fn the_prompt_box_of_an_orchestrator_says_what_a_prompt_is_good_for() {
         "Steer the orchestrator… (it keeps going while you type)"
     );
 
+    // A turn that ends as cancelled cancels the request with it.
     report(
         &mut fixture.state,
         &fixture.child,
-        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::Cancelled),
     );
     let title = fixture
         .state
@@ -3484,10 +3485,11 @@ fn the_last_row_tells_which_children_work_and_which_ask() {
     assert_eq!(shown(&mut ui, "api"), 2);
     drop(ui);
 
+    // A turn that ends as cancelled cancels the request with it.
     report(
         state,
         &child,
-        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::Cancelled),
     );
     let mut ui = simulator(view(state));
     assert!(ui.find("Waiting for api.").is_err());

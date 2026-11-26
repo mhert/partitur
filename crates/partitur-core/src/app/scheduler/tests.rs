@@ -2496,11 +2496,11 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
         ]
     );
 
-    // A request that lapses with its turn leaves too.
+    // A request cancelled with its turn leaves too.
     send(
         &mut fixture,
         &web,
-        AgentUpdate::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     orchestrate(&mut fixture, &web);
     send(&mut fixture, &web, asking(1, "Edit web.rs"));
@@ -2520,6 +2520,30 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
         [ask(&web, 1, "Edit web.rs")]
     );
     assert_eq!(fixture.app.permissions.asked.len(), 1);
+}
+
+#[test]
+fn a_permission_open_when_a_deferred_prompt_goes_out_belongs_to_the_new_turn() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    orchestrate(&mut fixture, &child);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    fixture
+        .app
+        .answer_permission(child.clone(), PermissionId(1), None)
+        .unwrap();
+
+    assert_eq!(status(&fixture.app, &child), Status::Running);
 }
 
 #[test]

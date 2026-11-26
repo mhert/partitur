@@ -2741,21 +2741,84 @@ fn a_late_permission_answer_is_ignored() {
     );
 }
 
+/// A session of an open project, prompted with `go` and its first answer from the files port
+/// in.
+fn prompted_session(fixture: &mut Fixture, dir: &Path) -> SessionId {
+    let project = fixture.open(dir);
+    let session = created_session(fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go").unwrap();
+    answer_files(fixture);
+    session
+}
+
+/// The record of the request `id` answered with `option`, `None` for a cancel or a lapse.
+fn answered(id: u64, option: Option<&str>) -> TranscriptRecord {
+    TranscriptRecord::PermissionAnswered {
+        id: PermissionId(id),
+        option: option.map(PermissionOptionId::new),
+    }
+}
+
+const ALLOW_ONCE: [(&str, PermissionKind); 1] = [("allow", PermissionKind::AllowOnce)];
+
 #[test]
-fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
+fn a_permission_still_waiting_when_the_turn_ends_stays_open() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.open(dir.path());
-    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    let options = [("allow", PermissionKind::AllowOnce)];
-    let lapsed = |id| TranscriptRecord::PermissionAnswered {
-        id: PermissionId(id),
-        option: None,
-    };
-    fixture.app.submit_prompt("go").unwrap();
-    answer_files(&mut fixture);
-    send(&mut fixture, &session, permission(1, &options));
-    send(&mut fixture, &session, permission(2, &options));
+    let session = prompted_session(&mut fixture, dir.path());
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+    let calls = fixture.backend.calls().len();
+
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+    assert!(matches!(
+        entries(&fixture.app)[1],
+        Entry::Permission { answer: None, .. }
+    ));
+    assert!(answered_updates(&fixture.store, &session).is_empty());
+    assert!(matches!(
+        fixture.app.submit_prompt("too early"),
+        Err(AppError::TurnInProgress)
+    ));
+
+    fixture
+        .app
+        .answer_permission(
+            session.clone(),
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow")),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[calls..],
+        [Call::RespondPermission {
+            session: session.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("allow")),
+        }]
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [answered(1, Some("allow"))]
+    );
+    fixture.app.submit_prompt("again").unwrap();
+}
+
+#[test]
+fn a_permission_waiting_at_a_cancelled_turn_end_is_cancelled_with_the_agent() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+    send(&mut fixture, &session, permission(2, &ALLOW_ONCE));
     let calls = fixture.backend.calls().len();
 
     send(
@@ -2764,30 +2827,63 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
         AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
-    assert_eq!(fixture.backend.calls().len(), calls);
+    let cancel = |id| Call::RespondPermission {
+        session: session.clone(),
+        permission: PermissionId(id),
+        option: None,
+    };
+    assert_eq!(fixture.backend.calls()[calls..], [cancel(1), cancel(2)]);
     assert_eq!(status(&fixture.app), Status::Done);
-    let entries = entries(&fixture.app);
-    assert_eq!(answer_of(&entries[1]), None);
-    assert_eq!(answer_of(&entries[2]), None);
     assert_eq!(
         answered_updates(&fixture.store, &session),
-        [lapsed(1), lapsed(2)]
+        [answered(1, None), answered(2, None)]
+    );
+    fixture.app.submit_prompt("again").unwrap();
+}
+
+#[test]
+fn a_cancel_the_backend_refuses_at_a_cancelled_turn_end_lapses() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+    send(&mut fixture, &session, permission(2, &ALLOW_ONCE));
+    fixture.backend.fail_next_call();
+
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
+    assert_eq!(status(&fixture.app), Status::Done);
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [answered(2, None), answered(1, None)]
+    );
+    assert!(!fixture.app.permissions.any_of(&session));
     fixture.app.submit_prompt("again").unwrap();
-    answer_files(&mut fixture);
-    send(&mut fixture, &session, permission(3, &options));
+}
+
+#[test]
+fn a_permission_waiting_when_the_turn_fails_lapses() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(&mut fixture, &session, permission(3, &ALLOW_ONCE));
+    let calls = fixture.backend.calls().len();
+
     send(
         &mut fixture,
         &session,
         AgentUpdate::Failed("crashed".into()),
     );
 
-    assert_eq!(fixture.backend.calls().len(), calls + 1);
+    assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(status(&fixture.app), Status::Failed);
     assert_eq!(
         answered_updates(&fixture.store, &session),
-        [lapsed(1), lapsed(2), lapsed(3)]
+        [answered(3, None)]
     );
     let reloaded = Transcript::from_updates(
         &fixture
@@ -2801,6 +2897,109 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
             .iter()
             .all(|entry| !matches!(entry, Entry::Permission { answer: None, .. }))
     );
+}
+
+#[test]
+fn a_permission_after_the_turn_returns_the_session_to_its_status() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
+
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+    send(&mut fixture, &session, permission(2, &ALLOW_ONCE));
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+
+    fixture
+        .app
+        .answer_permission(
+            session.clone(),
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow")),
+        )
+        .unwrap();
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+
+    fixture
+        .app
+        .answer_permission(session.clone(), PermissionId(2), None)
+        .unwrap();
+    assert_eq!(status(&fixture.app), Status::Done);
+    fixture.app.submit_prompt("again").unwrap();
+}
+
+#[test]
+fn a_permission_after_a_failed_turn_returns_the_session_to_failed() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Failed("crashed".into()),
+    );
+    assert_eq!(status(&fixture.app), Status::Failed);
+
+    send(&mut fixture, &session, permission(2, &ALLOW_ONCE));
+    fixture
+        .app
+        .answer_permission(session.clone(), PermissionId(2), None)
+        .unwrap();
+
+    assert_eq!(status(&fixture.app), Status::Failed);
+}
+
+#[test]
+fn a_permission_answered_at_once_after_the_turn_leaves_the_status_alone() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    fixture.app.set_auto_allow(session.clone(), true).unwrap();
+
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [answered(1, Some("allow"))]
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
+}
+
+#[test]
+fn stop_cancels_a_late_permission_and_leaves_the_session_done() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let session = prompted_session(&mut fixture, dir.path());
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    send(&mut fixture, &session, permission(1, &ALLOW_ONCE));
+
+    fixture.app.cancel().unwrap();
+
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [answered(1, None)]
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
 }
 
 #[test]
@@ -3248,7 +3447,7 @@ fn closing_a_project_drops_its_waiting_permissions_but_keeps_the_others() {
             option: None,
         }
     );
-    assert_eq!(status(&fixture.app), Status::Running);
+    assert_eq!(status(&fixture.app), Status::Idle);
 }
 
 #[test]
