@@ -1469,7 +1469,7 @@ impl App {
             return self.settle_turn(&id, ChildOutcome::Ended(StopReason::Cancelled), false);
         }
         for (permission, _) in self.waiting_permissions(&id) {
-            self.answer_permission(id.clone(), permission, None)?;
+            self.settle_permission(id.clone(), permission, None)?;
         }
         self.backend.cancel(id)?;
         Ok(())
@@ -1479,32 +1479,49 @@ impl App {
     ///
     /// The answer goes into the transcript, and once none of its requests is waiting the
     /// session takes the status it had without them: it runs again when they came inside a
-    /// running turn, and otherwise goes back to the status its turn's end gave it or it had
-    /// when they arrived outside a turn. A request that is not waiting (already answered,
-    /// settled by the end of its turn, or unknown) is ignored, and so is any answer but a rejection or a
-    /// cancel to a request whose paths are still being resolved: nothing is granted before
-    /// Partitur has decided the request.
+    /// running turn. Requests that outlasted their turn's end, or arrived outside a turn,
+    /// return it to the status it had then, as
+    /// [`restored_status`](Self::restored_status) reads it now, and the oldest prompt
+    /// Partitur deferred for it while they waited goes out. A request that is not waiting
+    /// (already answered, settled by the end of its turn, or unknown) is ignored, and so is
+    /// any answer but a rejection or a cancel to a request whose paths are still being
+    /// resolved: nothing is granted before Partitur has decided the request.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::Backend`] when the backend cannot queue the answer (the request keeps
-    /// waiting).
+    /// waiting) or the deferred prompt.
     pub fn answer_permission(
         &mut self,
         session: SessionId,
         permission: PermissionId,
         option: Option<PermissionOptionId>,
     ) -> Result<(), AppError> {
+        if let Some(session) = self.settle_permission(session, permission, option)? {
+            self.deliver_next(&session)?;
+        }
+        Ok(())
+    }
+
+    /// Answers a permission request as [`answer_permission`](Self::answer_permission) does,
+    /// but sends no deferred prompt; returns the session when the answer returned it to the
+    /// status it had outside a turn.
+    fn settle_permission(
+        &mut self,
+        session: SessionId,
+        permission: PermissionId,
+        option: Option<PermissionOptionId>,
+    ) -> Result<Option<SessionId>, AppError> {
         let waiting = (session, permission);
         let Some(options) = self.permissions.waiting.get(&waiting) else {
-            return Ok(());
+            return Ok(None);
         };
         if self.permissions.resolving.contains_key(&waiting)
             && option
                 .as_ref()
                 .is_some_and(|chosen| !rejects(options, chosen))
         {
-            return Ok(());
+            return Ok(None);
         }
         let (session, permission) = waiting;
         self.backend
@@ -1522,13 +1539,40 @@ impl App {
         };
         self.apply_update(&session, &answered)?;
         if self.permissions.any_of(&session) {
-            return Ok(());
+            return Ok(None);
         }
-        let status = self
-            .live_mut(&session)
+        let restored = self.restored_status(&session)?;
+        self.set_status(session.clone(), restored.unwrap_or(Status::Running))?;
+        Ok(restored.map(|_| session))
+    }
+
+    /// Takes the status the session returns to once none of its permission requests waits,
+    /// `None` when they belong to a running turn. A remembered [`Done`](Status::Done) or
+    /// [`WaitingForYou`](Status::WaitingForYou) is read again as the end of a turn reads it,
+    /// so a proposal, gate or question opened or closed while the requests waited counts.
+    fn restored_status(&mut self, session: &SessionId) -> Result<Option<Status>, AppError> {
+        let Some(remembered) = self
+            .live_mut(session)
             .and_then(|live| live.after_permissions.take())
-            .unwrap_or(Status::Running);
-        self.set_status(session, status)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(match remembered {
+            Status::Done | Status::WaitingForYou if self.waits_for_you(session)? => {
+                Status::WaitingForYou
+            }
+            Status::Done | Status::WaitingForYou => Status::Done,
+            other => other,
+        }))
+    }
+
+    /// Whether a finished turn of the session leaves it waiting for you: a proposal of it is
+    /// undecided, or a gate or a question of it is open.
+    fn waits_for_you(&self, session: &SessionId) -> Result<bool, AppError> {
+        self.session(session)?;
+        Ok(self.awaits_decision(session)
+            || self.gate_open(session).is_some()
+            || self.question_open(session))
     }
 
     /// The permission requests of `session` whose paths are still being resolved, oldest
@@ -2040,7 +2084,8 @@ impl App {
     /// makes the session [`WaitingForYou`](Status::WaitingForYou), or
     /// with auto-allow is answered at once with the first "allow once" option (else the first
     /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
-    /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
+    /// [`Failed`](Status::Failed), and the end settles its waiting permission requests as
+    /// [`end_turn`](Self::end_turn) describes. New config
     /// options replace the session's and set its model and effort to their current values.
     /// A config change the agent rejected, when it is the latest pick for its option, puts that
     /// option back to the value the agent reported last and records it, leaving other changes
@@ -2238,15 +2283,8 @@ impl App {
         Ok(())
     }
 
-    /// Sets the session's status and stamps its last activity with the current time. A
-    /// session that runs is in a turn, so it forgets the status it would return to once its
-    /// permission requests are answered: they now belong to the running turn.
+    /// Sets the session's status and stamps its last activity with the current time.
     fn set_status(&mut self, id: SessionId, status: Status) -> Result<(), AppError> {
-        if status == Status::Running
-            && let Some(live) = self.live_mut(&id)
-        {
-            live.after_permissions = None;
-        }
         let now = self.clock.now();
         self.change_session(id, |session| {
             session.status = status;
@@ -2508,14 +2546,16 @@ impl App {
 
     /// Forgets a backend session that ended outside a turn. Its waiting permission requests
     /// lapse as cancelled (the agent can no longer receive answers), a notice says why, and a
-    /// running or waiting session fails. The stored backend id is kept, so the next prompt
-    /// loads it again.
+    /// session in an open turn fails. One whose turn had ended, or that was outside a turn,
+    /// while requests waited takes the status it would have taken once they were answered.
+    /// The stored backend id is kept, so the next prompt loads it again.
     ///
     /// A turn cut short this way ends like a failed one: a child reports the notice to its
     /// parent as the failure, and the next prompt Partitur deferred for the session goes out,
     /// which loads the backend session again.
     fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
-        let in_turn = self.in_turn(id)?;
+        let turn_open = self.turn_open(id)?;
+        let restored = self.restored_status(id)?;
         if let Some(live) = self.live_mut(id) {
             live.attached = false;
             live.background = 0;
@@ -2524,26 +2564,31 @@ impl App {
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
         self.apply_update(id, &TranscriptRecord::Notice(notice.clone()))?;
-        if !in_turn {
-            return Ok(());
+        if !turn_open {
+            return match restored {
+                Some(status) => self.set_status(id.clone(), status),
+                None => Ok(()),
+            };
         }
         self.set_status(id.clone(), Status::Failed)?;
         self.settle_turn(id, ChildOutcome::Failed(notice), true)
     }
 
     /// Fails a session whose backend session could not be created: its waiting prompts are
-    /// dropped and a notice says why. A child that was in a turn reports `error` to its
-    /// parent as the failure; prompts Partitur deferred for the session stay queued, since a
+    /// dropped, its waiting permission requests lapse and a notice says why. A child in an
+    /// open turn reports `error` to its parent as the failure; one whose turn had already
+    /// ended reported then. Prompts Partitur deferred for the session stay queued, since a
     /// session that cannot be created would only fail them again.
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
-        let in_turn = self.in_turn(id)?;
+        let turn_open = self.turn_open(id)?;
         if let Some(live) = self.live_mut(id) {
             live.queued.clear();
             live.background = 0;
         }
+        self.lapse_permissions(id)?;
         self.set_status(id.clone(), Status::Failed)?;
         self.apply_update(id, &TranscriptRecord::Notice(error.clone()))?;
-        if !in_turn {
+        if !turn_open {
             return Ok(());
         }
         self.settle_turn(id, ChildOutcome::Failed(error), false)
@@ -2559,6 +2604,16 @@ impl App {
             Status::WaitingForYou => self.has_waiting_permission(id),
             Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
         })
+    }
+
+    /// Whether a turn of the session is open: it is [in a turn](Self::in_turn), and its
+    /// waiting permission requests, if any, are not ones that outlasted their turn's end or
+    /// arrived outside a turn.
+    fn turn_open(&self, id: &SessionId) -> Result<bool, AppError> {
+        Ok(self.in_turn(id)?
+            && self
+                .live(id)
+                .is_none_or(|live| live.after_permissions.is_none()))
     }
 
     /// Whether a permission request of the session waits for an answer.
@@ -2781,32 +2836,33 @@ impl App {
     }
 
     /// Ends the session's turn with `status`: a child reports `outcome` to its parent, and
-    /// the next prompt Partitur deferred for the session goes out. A cancelled turn reports too but sends nothing: a stopped session
-    /// stays quiet until the user prompts it, and its queue moves on when a later turn ends
-    /// otherwise. A session that would be [`Done`](Status::Done) with an undecided proposal
-    /// is [`WaitingForYou`](Status::WaitingForYou) instead: it waits for the decision, but its
-    /// turn is over, so it takes a user prompt and its next deferred prompt goes out as after
-    /// any other turn; the turn that starts ends in [`WaitingForYou`](Status::WaitingForYou)
-    /// again while the proposal is undecided. A session that would be
-    /// [`Done`](Status::Done) with a gate or a question open waits for you the same way, until
-    /// the user approves the gate, answers the question or prompts it. A turn the agent
-    /// started on its own ends the same way and reports to the parent as started by the agent.
+    /// the next prompt Partitur deferred for the session goes out. A cancelled turn reports
+    /// too but sends nothing: a stopped session stays quiet until the user prompts it, and
+    /// its queue moves on when a later turn ends otherwise. A session that would be
+    /// [`Done`](Status::Done) with an undecided proposal is
+    /// [`WaitingForYou`](Status::WaitingForYou) instead: it waits for the decision, but its
+    /// turn is over, so it takes a user prompt and its next deferred prompt goes out as
+    /// after any other turn; the turn that starts ends in
+    /// [`WaitingForYou`](Status::WaitingForYou) again while the proposal is undecided. A
+    /// session that would be [`Done`](Status::Done) with a gate or a question open waits
+    /// for you the same way, until the user approves the gate, answers the question or
+    /// prompts it. A turn the agent started on its own ends the same way and reports to the
+    /// parent as started by the agent.
     ///
     /// Its unanswered permission requests outlast a turn that ended normally, since the agent
-    /// (or a subagent of it) still waits for the answers: the session then waits for you, and
-    /// takes the status the end gave it once they are answered. A cancelled turn cancels
-    /// them with the agent, and a failed one lapses them, since the agent can no longer
-    /// receive answers; a cancel the backend refuses lapses as well.
+    /// (or a subagent of it) still waits for the answers: the session then waits for you,
+    /// sends no deferred prompt yet, and once they are answered takes the status the end gave
+    /// it and sends the next one, as [`answer_permission`](Self::answer_permission)
+    /// describes. A cancelled turn cancels them with the agent, and a failed one lapses
+    /// them, since the agent can no longer receive answers; a cancel the backend refuses
+    /// lapses as well.
     fn end_turn(
         &mut self,
         session: &SessionId,
         status: Status,
         outcome: ChildOutcome,
     ) -> Result<(), AppError> {
-        let waits = self.awaits_decision(session)
-            || self.gate_open(session).is_some()
-            || self.question_open(session);
-        let status = if status == Status::Done && waits {
+        let status = if status == Status::Done && self.waits_for_you(session)? {
             Status::WaitingForYou
         } else {
             status
@@ -2815,21 +2871,22 @@ impl App {
             ChildOutcome::Ended(StopReason::Cancelled) => {
                 for (permission, _) in self.waiting_permissions(session) {
                     // A cancel the backend refuses lapses below with the requests it leaves.
-                    let _ = self.answer_permission(session.clone(), permission, None);
+                    let _ = self.settle_permission(session.clone(), permission, None);
                 }
                 self.lapse_permissions(session)?;
             }
             ChildOutcome::Ended(_) => {}
             ChildOutcome::Failed(_) => self.lapse_permissions(session)?,
         }
-        let shown = if self.permissions.any_of(session) {
+        let waiting = self.permissions.any_of(session);
+        let shown = if waiting {
             self.live_entry(session).after_permissions = Some(status);
             Status::WaitingForYou
         } else {
             status
         };
         self.set_status(session.clone(), shown)?;
-        let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
+        let drain = !waiting && outcome != ChildOutcome::Ended(StopReason::Cancelled);
         self.settle_turn(session, outcome, drain)
     }
 

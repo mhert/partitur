@@ -3485,6 +3485,17 @@ fn the_last_row_tells_which_children_work_and_which_ask() {
     assert_eq!(shown(&mut ui, "api"), 2);
     drop(ui);
 
+    // The request outlasts a turn that ends normally, so the child still asks.
+    report(
+        state,
+        &child,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
+    let mut ui = simulator(view(state));
+    assert!(ui.find("Waiting for api.").is_err());
+    ui.find("asks you.").unwrap();
+    drop(ui);
+
     // A turn that ends as cancelled cancels the request with it.
     report(
         state,

@@ -12,10 +12,10 @@
 //! it: an answer that allows it is ignored, and so is turning on auto-allow, which the
 //! decision reads when the answer comes. It can still be cancelled, and the end of its turn
 //! keeps, cancels or lapses it like any other request. The answer then decides it exactly as
-//! the check of the same facts always did: allowed, denied for the orchestrator, or asked. A resolution that failed
-//! resolves nothing, so the request is decided as one whose paths cannot be resolved. An
-//! answer for a request that was answered, lapsed or whose session was deleted meanwhile is
-//! dropped.
+//! the check of the same facts always did: allowed, denied for the orchestrator, or asked. A
+//! resolution that failed resolves nothing, so the request is decided as one whose paths
+//! cannot be resolved. An answer for a request that was answered, lapsed or whose session was
+//! deleted meanwhile is dropped.
 
 use super::{App, AppError, PermissionCall};
 use crate::app::live::Resolving;

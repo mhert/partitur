@@ -2496,7 +2496,16 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
         ]
     );
 
-    // A request cancelled with its turn leaves too.
+    // A request outlasts a turn that ended normally, and leaves with one cancelled.
+    send(
+        &mut fixture,
+        &web,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(
+        child_asks(&fixture.app, &parent)[0],
+        ask(&web, 1, "Read web.rs")
+    );
     send(
         &mut fixture,
         &web,
@@ -2522,10 +2531,33 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
     assert_eq!(fixture.app.permissions.asked.len(), 1);
 }
 
+/// A child of the family whose turn, started by its orchestrator, ended normally while its
+/// request `Read api.rs` still waits; its result has reached the orchestrator.
+fn ended_with_a_request_open() -> Family {
+    let family = family();
+    let (mut fixture, child) = (family.fixture, family.child);
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    Family {
+        fixture,
+        child,
+        ..family
+    }
+}
+
 #[test]
-fn a_permission_open_when_a_deferred_prompt_goes_out_belongs_to_the_new_turn() {
+fn a_deferred_prompt_waits_for_a_request_kept_open_after_the_turn() {
     let Family {
-        mut fixture, child, ..
+        mut fixture,
+        parent,
+        child,
+        ..
     } = family();
     orchestrate(&mut fixture, &child);
     orchestrate(&mut fixture, &child);
@@ -2537,13 +2569,83 @@ fn a_permission_open_when_a_deferred_prompt_goes_out_belongs_to_the_new_turn() {
         &child,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
-    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 1);
+    assert_eq!(
+        child_asks(&fixture.app, &parent),
+        [(child.clone(), 1, "Read api.rs".to_owned())]
+    );
+
     fixture
         .app
         .answer_permission(child.clone(), PermissionId(1), None)
         .unwrap();
 
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 2);
     assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn a_prompt_generated_while_a_late_request_waits_goes_out_after_the_answer() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    finish(&mut fixture, &child, "done");
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+
+    orchestrate(&mut fixture, &child);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    fixture
+        .app
+        .answer_permission(child.clone(), PermissionId(1), None)
+        .unwrap();
+
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 2);
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn a_close_after_the_turn_ended_with_a_request_open_reports_nothing_more() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = ended_with_a_request_open();
+    let reported = prompts(&fixture.backend, &parent).len();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: child.clone(),
+            error: SessionFailure::RequestFailed("agent crashed".into()),
+        })
+        .unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &parent).len(), reported);
+    assert_eq!(status(&fixture.app, &child), Status::Done);
+    assert!(child_asks(&fixture.app, &parent).is_empty());
+    assert!(!fixture.app.has_waiting_permission(&child));
+}
+
+#[test]
+fn a_failed_create_after_the_turn_ended_with_a_request_open_reports_nothing_more() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = ended_with_a_request_open();
+    let reported = prompts(&fixture.backend, &parent).len();
+
+    fixture.app.fail_session(&child, "no agent".into()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &parent).len(), reported);
+    assert_eq!(status(&fixture.app, &child), Status::Failed);
+    assert!(child_asks(&fixture.app, &parent).is_empty());
+    assert!(!fixture.app.has_waiting_permission(&child));
 }
 
 #[test]

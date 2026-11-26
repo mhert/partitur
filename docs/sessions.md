@@ -353,8 +353,11 @@ A session that asks you to allow a tool call shows `waiting for you` until you a
   session wait for you too.
 - Once every open request is answered, the session goes back to the status it had: `done`,
   or `waiting for you` while a proposal, a [workflow gate](workflows.md#gates) or a
-  [question](#questions) is still open. A request answered inside a running turn lets the
-  session run on.
+  [question](#questions) is open at that moment. A prompt Partitur generated for it meanwhile,
+  such as an orchestrator's follow-up, waits until then and goes out after the answer. A
+  request answered inside a running turn lets the session run on.
+- When the agent's connection closes while such a request is open, the request is dropped
+  and the session takes the status it would have gone back to.
 - `Stop` cancels the open requests. A turn the agent ends as cancelled cancels them too, so a
   subagent still waiting on one goes on; a turn that fails drops them, since the agent can no
   longer receive an answer.
@@ -368,7 +371,10 @@ among its siblings, marks every session above it with `child asks you`, so a fol
 still shows it, and the status line counts it as `N interrupted`. The mark stays until the
 session's next turn: a prompt resumes the session as it would an idle one. A session whose turn finished or failed
 is not interrupted, and neither is an orchestrator whose turn ended on a proposal you had not
-decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates) still asks
+decided yet. A session whose turn finished while a [permission
+request](#permission-requests) stayed open, or that got one after its turn, does come back
+interrupted: the request is not kept across the restart. A session whose turn ended at a
+[workflow gate](workflows.md#gates) still asks
 you after the restart, with its gate open; an orchestrator's child waits for its orchestrator
 again instead. A stop counts only once the agent confirmed it: quitting right after pressing
 stop can still leave the session interrupted.

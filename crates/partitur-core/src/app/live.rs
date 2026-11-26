@@ -140,10 +140,9 @@ pub(super) struct LiveSession {
     /// The read of the context on its way; only its answer is taken.
     pub(super) context_read: Option<ContextRead>,
     /// The status the session takes once none of its permission requests waits: the one its
-    /// turn's end gave it, or the one it had when a request arrived outside a turn. `None`
-    /// means [`Running`](Status::Running), for requests inside a running turn, and
-    /// every status that starts a turn forgets it. Kept in memory only: no request outlives
-    /// the agent's process.
+    /// turn's end gave it, or the one it had when a request arrived outside a turn. Set only
+    /// while such requests wait; `None` means [`Running`](Status::Running), for requests
+    /// inside a running turn. Kept in memory only: after a restart no request waits.
     pub(super) after_permissions: Option<Status>,
 }
 
