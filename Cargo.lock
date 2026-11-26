@@ -3992,6 +3992,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "partitur-widgets"
+version = "0.5.0"
+dependencies = [
+ "futures",
+ "partitur-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

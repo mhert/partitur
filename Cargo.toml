@@ -9,6 +9,7 @@ members = [
     "crates/partitur-iced",
     "crates/partitur-mcp",
     "crates/partitur-store",
+    "crates/partitur-widgets",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ partitur-backend-acp = { path = "crates/partitur-backend-acp" }
 partitur-iced = { path = "crates/partitur-iced" }
 partitur-mcp = { path = "crates/partitur-mcp" }
 partitur-cef = { path = "crates/partitur-cef" }
+partitur-widgets = { path = "crates/partitur-widgets" }
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
