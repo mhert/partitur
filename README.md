@@ -8,9 +8,10 @@ Partitur is a native desktop app for running AI coding agents across a whole app
 just one repository. Agents work spec-driven: a session that follows the
 [superpowers](https://github.com/obra/superpowers) workflow shows where it stands, from
 brainstorm through design, plan and execution to finish, and stops at every gate until you
-approve. An orchestrator splits a change into one session per repository; the children work in
-parallel and report back. It speaks the Agent Client Protocol: Claude Code and GitHub Copilot
-are supported.
+approve. The [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) (6.12) is reported
+the same way. An orchestrator splits a change into one session per repository; the children
+work in parallel and report back. It speaks the Agent Client Protocol: Claude Code, GitHub
+Copilot and opencode are supported.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/split-dark.png">
@@ -22,6 +23,13 @@ are supported.
 - **Spec-driven, with you at the gates.** The design and the plan open in the Spec tab;
   approve them, or request changes, before execution starts. The flow rail shows the
   task at work and its test-driven phase, and `G` jumps to the session that has waited longest.
+  A BMAD run gets the same treatment: an orchestrator leads it and runs one child per
+  workflow, from the brief and PRD through sprint planning to each story's build, review and
+  the retrospective, and each document and verdict waits for you at its gate.
+- **New or existing branches.** Start a session in the main checkout or a worktree, on the
+  branch as it is, a new one, or one that already exists, including a worktree it already
+  has. Split cards offer the same. Cleanup leaves branches and worktrees that other sessions
+  share or that were there before, and says why.
 - **Every agent at a glance.** The main window is a session tree per project, not an editor:
   live status and workflow step, `asks you` where a session waits for you, and `Ctrl K` to
   jump anywhere. The Env tab shows what shaped a session: instruction files, model, effort,
@@ -31,11 +39,15 @@ are supported.
   Branches and worktrees are removed only when you tick their box.
 - **Native and fast.** Written in Rust with iced. Git and agent work run in the background, so
   the window stays responsive, in light and dark.
-- **Built on ACP.** Your agent keeps its own setup, instruction files and accounts; several
-  accounts can run side by side as backends.
+- **Built on ACP.** Claude Code, GitHub Copilot CLI and opencode keep their own setup,
+  instruction files and accounts; several accounts can run side by side as backends.
 - **Widgets inline.** A tool whose MCP server ships an MCP App shows its widget right under the
-  tool call, drawn by an embedded Chromium, on Linux and Windows. On macOS widgets fall back
-  to the tool's text for now.
+  tool call, drawn by an embedded Chromium on the GPU, on Linux and Windows. On macOS widgets
+  fall back to the tool's text for now.
+- **Agents can draw.** An agent can show you a diagram or a sketch as an SVG, or a whole HTML
+  page, in a viewer over the window that follows your light or dark theme. It stays in the
+  transcript, so you can open it again. HTML pages need the embedded Chromium; SVG works
+  everywhere.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/spec-dark.png">
@@ -133,9 +145,12 @@ need:
 - For GitHub Copilot backends, the Copilot CLI (`npm install -g @github/copilot`, Homebrew or
   winget), installed and logged in, with `copilot` on `PATH`. It is not bundled, and its
   sessions show no widgets. See [Configuration](docs/configuration.md#github-copilot).
+- For opencode backends, opencode with a model configured, and `opencode` on `PATH`. It is not
+  bundled either. See [Configuration](docs/configuration.md#opencode).
 - git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's. On
   Windows, Git for Windows (`winget install Git.Git`), with `git` on `PATH`.
-- The superpowers skills in your agent, for the spec-driven workflow.
+- The superpowers skills or the BMAD Method (6.12) in your agent, for the spec-driven
+  workflow.
 
 ### From source
 
@@ -163,10 +178,11 @@ on stderr (default `partitur=info`).
 
 - [Configuration](docs/configuration.md): backends, accounts, worktree paths and other settings.
 - [Keyboard](docs/keyboard.md): every shortcut.
-- [Sessions](docs/sessions.md): starting, branches and worktrees, archiving and deleting.
+- [Sessions](docs/sessions.md): starting, new and existing branches and worktrees, widgets
+  and drawings, archiving and deleting.
 - [Orchestration](docs/orchestration.md): how an orchestrator splits, steers and collects work.
 - [Workflow reporting](docs/workflows.md): the flow rail, the Spec tab and the gates of a
-  superpowers session.
+  superpowers session, and BMAD workflows and runs.
 
 ## Development
 
