@@ -523,7 +523,16 @@ fn a_worktree_for_an_existing_branch_needs_a_free_folder() {
 
     assert_eq!(
         blocker_of(choice(BranchMode::ExistingWorktree, Some("b")), &world).as_deref(),
-        Some("/p/api-wt/b already exists")
+        Some(
+            format!(
+                "{} already exists",
+                Path::new("/p/api-wt/b")
+                    .components()
+                    .collect::<PathBuf>()
+                    .display()
+            )
+            .as_str()
+        )
     );
 }
 
