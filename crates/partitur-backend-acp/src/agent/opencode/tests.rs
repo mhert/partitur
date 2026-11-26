@@ -571,7 +571,7 @@ fn the_process_gets_the_config_content() {
         instructions_dir: Some(PathBuf::from("/data/agent-instructions")),
         ..AcpConfig::default()
     };
-    let file = Path::new("/data/agent-instructions/partitur.instructions.md");
+    let file = &Path::new("/data/agent-instructions").join("partitur.instructions.md");
     assert_eq!(
         process_env_of(&config, ToolRole::Orchestrator, None),
         [(

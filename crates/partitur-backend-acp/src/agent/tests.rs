@@ -150,9 +150,7 @@ fn the_process_gets_every_profiles_variables() {
                 config_content(
                     None,
                     ToolRole::Plain,
-                    Some(Path::new(
-                        "/data/agent-instructions/partitur.instructions.md"
-                    )),
+                    Some(&Path::new("/data/agent-instructions").join("partitur.instructions.md")),
                     Some("http://tools")
                 )
             ),
