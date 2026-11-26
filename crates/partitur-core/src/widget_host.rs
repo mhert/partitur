@@ -19,7 +19,8 @@
 //! whole [`Picture`] as the engine paints it, in BGRA with premultiplied alpha, and the
 //! [`Damage`]: the regions painted since the UI last took the picture. A paint copies only the
 //! regions it changed into the picture and adds them to the damage; a paint of another size
-//! replaces the picture, all of it damaged. The engine sends a [`WidgetHostEvent::Frame`] only
+//! replaces the picture, all of it damaged. A paint can also come as regions that carry only
+//! their own rows ([`LatestFrame::paint_regions`]). The engine sends a [`WidgetHostEvent::Frame`] only
 //! when its paint found the damage empty, so however fast it paints, at most one frame event
 //! per view waits. Taking the picture it announces ([`LatestFrame::take`]) yields the damage and
 //! empties it. The UI then reads the newest pixels in place, under the slot's lock
@@ -298,6 +299,25 @@ fn copy_region(into: &mut [u8], from: &[u8], width: u32, region: Region) {
     }
 }
 
+/// Copies `rows`, the rows of `region` alone, into the picture `into`, `width` pixels wide, the
+/// region inside it.
+fn copy_rows(into: &mut [u8], rows: &[u8], width: u32, region: Region) {
+    let Some(len) = byte_len(region.width, 1) else {
+        return;
+    };
+    for (y, row) in (region.y..region.bottom()).zip(rows.chunks_exact(len)) {
+        let Some(at) = byte_len(width, y)
+            .zip(byte_len(region.x, 1))
+            .map(|(row, x)| row + x)
+        else {
+            return;
+        };
+        if let Some(into) = into.get_mut(at..at + len) {
+            into.copy_from_slice(row);
+        }
+    }
+}
+
 /// A view's picture and what of it changed since the UI last took it.
 #[derive(Default)]
 struct Canvas {
@@ -305,6 +325,21 @@ struct Canvas {
     picture: Picture,
     /// The regions painted since the last take.
     damage: Damage,
+}
+
+impl Canvas {
+    /// Replaces the picture with a transparent one `width` by `height` pixels large, `len` bytes,
+    /// all of it damaged, unless it has that size already.
+    fn fit(&mut self, width: u32, height: u32, len: usize) {
+        if (self.picture.width, self.picture.height) != (width, height) {
+            self.picture.width = width;
+            self.picture.height = height;
+            self.picture.bgra.clear();
+            self.picture.bgra.resize(len, 0);
+            self.damage = Damage::default();
+            self.damage.add(Region::whole(width, height));
+        }
+    }
 }
 
 /// The slot through which a view's pictures pass from the engine to the UI; see the module
@@ -332,20 +367,45 @@ impl LatestFrame {
         }
         let mut canvas = self.lock();
         let was_empty = canvas.damage.is_empty();
+        canvas.fit(width, height, pixels.len());
         let Canvas { picture, damage } = &mut *canvas;
-        if (picture.width, picture.height) != (width, height) {
-            picture.width = width;
-            picture.height = height;
-            picture.bgra.clear();
-            picture.bgra.resize(pixels.len(), 0);
-            *damage = Damage::default();
-            damage.add(Region::whole(width, height));
-        }
         for region in dirty
             .into_iter()
             .filter_map(|region| region.within(width, height))
         {
             copy_region(&mut picture.bgra, pixels, width, region);
+            damage.add(region);
+        }
+        was_empty && !damage.is_empty()
+    }
+
+    /// Copies each of `regions` into the view's picture, `width` by `height` pixels large, and
+    /// adds it to the damage. Each region comes with its own rows only: `region.width * 4` bytes
+    /// per row, top to bottom, in BGRA with premultiplied alpha. A paint of another size than the
+    /// picture replaces it, all of it damaged and transparent where no region reaches. A region
+    /// not wholly inside the paint, or whose rows do not fill it, is dropped. Returns whether the
+    /// damage was empty and no longer is, which is when a [`WidgetHostEvent::Frame`] must
+    /// announce it.
+    pub fn paint_regions<'a>(
+        &self,
+        width: u32,
+        height: u32,
+        regions: impl IntoIterator<Item = (Region, &'a [u8])>,
+    ) -> bool {
+        let Some(len) = byte_len(width, height) else {
+            return false;
+        };
+        let mut canvas = self.lock();
+        let was_empty = canvas.damage.is_empty();
+        canvas.fit(width, height, len);
+        let Canvas { picture, damage } = &mut *canvas;
+        for (region, rows) in regions {
+            if region.within(width, height) != Some(region)
+                || byte_len(region.width, region.height) != Some(rows.len())
+            {
+                continue;
+            }
+            copy_rows(&mut picture.bgra, rows, width, region);
             damage.add(region);
         }
         was_empty && !damage.is_empty()
@@ -734,6 +794,90 @@ mod tests {
             latest.clone().paint(4, 3, &pixels, [region(0, 0, 1, 1)]),
             "the first paint after a take is announced"
         );
+    }
+
+    #[test]
+    fn regions_are_painted_from_their_own_rows() {
+        let latest = LatestFrame::default();
+        assert!(latest.paint_regions(4, 4, [(region(1, 1, 2, 1), &[9u8; 8][..])]));
+        let picture = latest.picture();
+        assert_eq!((picture.width, picture.height), (4, 4));
+        assert_eq!(&picture.bgra[20..28], &[9u8; 8]);
+        assert_eq!(&picture.bgra[16..20], &[0u8; 4]);
+        assert_eq!(&picture.bgra[28..32], &[0u8; 4]);
+    }
+
+    #[test]
+    fn each_row_of_a_region_lands_on_its_own_line() {
+        let latest = LatestFrame::default();
+        let rows: Vec<u8> = (1..=16).collect();
+        assert!(latest.paint_regions(3, 3, [(region(1, 1, 2, 2), &rows[..])]));
+        let bgra = latest.picture().bgra;
+        assert_eq!(&bgra[16..24], &rows[0..8]);
+        assert_eq!(&bgra[28..36], &rows[8..16]);
+        assert_eq!(&bgra[24..28], &[0u8; 4]);
+    }
+
+    #[test]
+    fn a_region_whose_rows_do_not_fill_it_is_dropped() {
+        let latest = LatestFrame::default();
+        latest.put(&Picture {
+            width: 2,
+            height: 2,
+            bgra: vec![0; 16],
+        });
+        latest.take();
+        assert!(!latest.paint_regions(2, 2, [(Region::whole(2, 2), &[1u8; 15][..])]));
+        assert!(!latest.paint_regions(2, 2, [(Region::whole(2, 2), &[1u8; 17][..])]));
+        assert_eq!(latest.take(), None);
+        assert_eq!(latest.picture().bgra, vec![0; 16]);
+    }
+
+    #[test]
+    fn a_region_outside_the_picture_is_dropped() {
+        let latest = LatestFrame::default();
+        latest.put(&Picture {
+            width: 4,
+            height: 4,
+            bgra: vec![0; 64],
+        });
+        latest.take();
+        assert!(!latest.paint_regions(4, 4, [(region(4, 0, 1, 1), &[1u8; 4][..])]));
+        assert!(!latest.paint_regions(4, 4, [(region(3, 0, 2, 1), &[1u8; 8][..])]));
+        assert_eq!(latest.take(), None);
+        assert_eq!(latest.picture().bgra, vec![0; 64]);
+    }
+
+    #[test]
+    fn a_paint_of_regions_too_large_for_memory_is_dropped() {
+        let latest = LatestFrame::default();
+        assert!(!latest.paint_regions(u32::MAX, u32::MAX, [(region(0, 0, 1, 1), &[1u8; 4][..])]));
+        assert_eq!(latest.size(), (0, 0));
+    }
+
+    #[test]
+    fn another_size_replaces_the_picture_all_of_it_damaged() {
+        let latest = LatestFrame::default();
+        latest.put(&Picture {
+            width: 2,
+            height: 2,
+            bgra: filled(2, 2, 7),
+        });
+        latest.take();
+        assert!(latest.paint_regions(3, 1, [(region(1, 0, 1, 1), &[5u8; 4][..])]));
+        assert_eq!(latest.size(), (3, 1));
+        assert_eq!(latest.picture().bgra, [0, 0, 0, 0, 5, 5, 5, 5, 0, 0, 0, 0]);
+        assert_eq!(latest.take(), Some(damage(&[Region::whole(3, 1)])));
+    }
+
+    #[test]
+    fn only_a_paint_that_finds_the_damage_empty_announces() {
+        let latest = LatestFrame::default();
+        assert!(latest.paint_regions(2, 1, [(region(0, 0, 1, 1), &[1u8; 4][..])]));
+        assert!(!latest.paint_regions(2, 1, [(region(1, 0, 1, 1), &[2u8; 4][..])]));
+        assert!(latest.take().is_some());
+        assert!(latest.paint_regions(2, 1, [(region(1, 0, 1, 1), &[3u8; 4][..])]));
+        assert_eq!(latest.take(), Some(damage(&[region(1, 0, 1, 1)])));
     }
 
     #[test]
