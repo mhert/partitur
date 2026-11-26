@@ -11,7 +11,15 @@
 #   every start of the binary outside cargo proves, the smoke included.
 # - partitur-cef: the CEF widget host does its work inside a running Chromium, so it is gated by
 #   its render tests (`tests/render.rs`, run under xvfb-run in CI) and its unit tests instead.
-exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/partitur-cef/**"]
+# - crates/partitur-widgets/src/bin/fake-widget-engine.rs: test support, the scripted engine the
+#   host's integration tests drive; a mutant of it changes what the tests ask, not what ships,
+#   and the tests that use each script are what prove the script.
+exclude_globs = [
+  "crates/partitur-iced/**",
+  "crates/partitur/build.rs",
+  "crates/partitur-cef/**",
+  "crates/partitur-widgets/src/bin/fake-widget-engine.rs",
+]
 
 # Mutants that survive by design, each pinned to exactly one function with its reason:
 #

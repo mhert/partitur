@@ -1,5 +1,7 @@
 //! The widget engine's shared ground: what the Partitur process and the helper process that
 //! renders MCP App widgets agree on. The helper is driven over its standard input and output,
-//! and the [`protocol`] module is the language they speak.
+//! and the [`protocol`] module is the language they speak. The [`host`] module is Partitur's
+//! side of it, the [`WidgetHost`](partitur_core::widget_host::WidgetHost) that runs the helper.
 
+pub mod host;
 pub mod protocol;

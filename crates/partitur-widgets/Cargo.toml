@@ -20,3 +20,5 @@ tracing.workspace = true
 [dev-dependencies]
 # Enables `partitur_core::testing` for this crate's tests.
 partitur-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+tracing-subscriber.workspace = true
