@@ -34,9 +34,9 @@
 //! - `crash-after-open`: plays `crash-always` unless restarted, then `echo`.
 //! - `crash-then-silent`: plays `crash-always` unless restarted, then `silent`.
 //! - `crash-leaving-child`: unless restarted, says hello and on `Open` starts a `hold` of its
-//!   own, which keeps its standard output open, and exits with code 1; restarted it plays
-//!   `echo`.
-//! - `hold`: sleeps three seconds.
+//!   own, which keeps its standard output open and logs to the same file, and exits with code 1;
+//!   restarted it plays `echo`.
+//! - `hold`: logs `held <pid>` and sleeps five seconds.
 //!
 //! An unknown script exits with a failure before its hello.
 
@@ -63,8 +63,9 @@ const HANG: Duration = Duration::from_secs(30);
 const IGNORED: Duration = Duration::from_secs(4);
 
 /// How long `hold` keeps the standard output it inherited open: past the host's wait for a
-/// crashed engine's threads, so the host must find the exit without the end of the output.
-const HOLD: Duration = Duration::from_secs(3);
+/// crashed engine's threads, so the host must find the exit without the end of the output, and
+/// well past the 2 s within which the test expects the host to have ended it.
+const HOLD: Duration = Duration::from_secs(5);
 
 /// How long a shutdown takes.
 const SHUTDOWN: Duration = Duration::from_millis(200);
@@ -327,8 +328,13 @@ fn crash_leaving_child(fake: &Fake) {
     fake.serve(|_, command| {
         if let ToEngine::Open { .. } = command {
             let me = std::env::current_exe().expect("the fake's path");
+            let log: Vec<String> = std::env::args()
+                .skip_while(|arg| arg != "--log")
+                .take(2)
+                .collect();
             std::process::Command::new(me)
                 .arg("hold")
+                .args(log)
                 .stdin(std::process::Stdio::null())
                 .spawn()
                 .expect("the hold starts");
@@ -337,7 +343,8 @@ fn crash_leaving_child(fake: &Fake) {
     });
 }
 
-fn hold(_fake: &Fake) {
+fn hold(fake: &Fake) {
+    fake.log(&format!("held {}", std::process::id()));
     std::thread::sleep(HOLD);
 }
 

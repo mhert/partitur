@@ -25,8 +25,9 @@
 //!
 //! A fourth thread, `widget-engine-watch`, supervises the running helper. When its output ends
 //! or cannot be read, or it exits unasked, that is a crash: the host reports
-//! [`WidgetHostEvent::EngineLost`], forgets every view's slot, ends what is left of the helper
-//! and starts a new one with [`NO_PROBE`] (and [`NO_SANDBOX`] when the crashed one ran without
+//! [`WidgetHostEvent::EngineLost`], forgets every view's slot, ends the crashed helper's whole
+//! process tree (also when the helper itself has exited and been reaped: its children may run
+//! on, and a process group's id is not given to another while any member lives) and starts a new one with [`NO_PROBE`] (and [`NO_SANDBOX`] when the crashed one ran without
 //! the sandbox), waiting [`Patience::hello`]. Its hello is reported as
 //! [`WidgetHostEvent::EngineBack`]. When that start fails, or a later helper crashes too, the
 //! host reports [`WidgetHostEvent::EngineStopped`] and starts no more. All of that happens on the
@@ -36,8 +37,9 @@
 //!
 //! Dropping the host sends [`ToEngine::Shutdown`] and gives the helper [`Patience::close`] to
 //! exit; a restart under way is broken off. A helper still running then has its whole process
-//! tree ended. A helper that has exited is never ended again, since its pid may already name
-//! another process. Every wait for a helper's threads is bounded, since a process the helper
+//! tree ended. A helper that exited in order after that shutdown is the one never ended again,
+//! since its pid may already name another process; a failed start's helper is ended like a
+//! crashed one. Every wait for a helper's threads is bounded, since a process the helper
 //! left behind may hold its pipes open.
 
 use std::collections::HashMap;
@@ -276,18 +278,22 @@ impl Notice {
 }
 
 /// One helper process and the threads that serve it. Dropping it ends the helper's whole process
-/// tree unless the helper has exited, then waits up to [`LINGER`] for the threads, which end with
-/// the helper's streams.
+/// tree unless the helper exited in order after a shutdown, then waits up to [`LINGER`] for the
+/// threads, which end with the helper's streams.
 #[derive(Debug)]
 struct Engine {
     child: Child,
     threads: Vec<JoinHandle<()>>,
+    /// Whether the helper exited after the host's own shutdown.
+    orderly: bool,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // A helper that exited has been reaped, and its pid may already name another process.
-        if exited(&mut self.child).is_none() {
+        // A helper that crashed or exited unasked may leave its children behind, and the group's
+        // id cannot name another group while any of them lives. A helper that exited in order
+        // after a shutdown leaves none, and its reaped pid may already name another process.
+        if !self.orderly {
             kill_tree(&mut self.child);
         }
         wait_for_threads(&self.threads, LINGER);
@@ -335,6 +341,7 @@ impl Supervisor {
         let mut engine = Engine {
             child,
             threads: Vec::new(),
+            orderly: false,
         };
         // Each stream was asked to be piped, so each is there.
         let (stdin, stdout, stderr) =
@@ -480,7 +487,7 @@ impl Supervisor {
             // The writer ends once the queue closes, after the commands still in it.
             let _ = commands.send(ToEngine::Shutdown);
         }
-        wait_for_exit(&mut engine.child, self.patience.close);
+        engine.orderly = wait_for_exit(&mut engine.child, self.patience.close).is_some();
     }
 }
 
@@ -985,6 +992,7 @@ mod tests {
         drop(Engine {
             child,
             threads: vec![thread],
+            orderly: false,
         });
         assert!(*joined.lock().unwrap());
         assert!(!partitur_core::testing::alive(&pid));
@@ -1116,5 +1124,58 @@ mod tests {
             ),
             "{heard:?}"
         );
+    }
+
+    /// A group whose leader exits at once while a member it started sleeps on, and that
+    /// member's pid.
+    #[cfg(unix)]
+    fn group_with_a_member_left() -> (Child, String) {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .stdout(Stdio::piped());
+        let mut leader = own_group(&mut command).spawn().unwrap();
+        let mut member = String::new();
+        leader
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut member)
+            .unwrap_or_default();
+        // The leader exits once it has named the member; reap it, as the exit poll does.
+        assert!(wait_for_exit(&mut leader, Duration::from_secs(10)).is_some());
+        (leader, member.trim().to_owned())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_crashed_helper_that_was_reaped_still_has_its_group_ended() {
+        let (child, member) = group_with_a_member_left();
+        assert!(partitur_core::testing::alive(&member));
+        drop(Engine {
+            child,
+            threads: Vec::new(),
+            orderly: false,
+        });
+        // The member is no child of ours: it is gone once its new parent has reaped it.
+        let reaped = (0..500).any(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            !partitur_core::testing::alive(&member)
+        });
+        assert!(reaped, "the group's member runs on");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_exited_in_order_is_never_signalled() {
+        let (child, member) = group_with_a_member_left();
+        drop(Engine {
+            child,
+            threads: Vec::new(),
+            orderly: true,
+        });
+        let alive = partitur_core::testing::alive(&member);
+        let _ = Command::new("kill").args(["-KILL", &member]).status();
+        assert!(alive, "the group of an orderly helper was signalled");
     }
 }
