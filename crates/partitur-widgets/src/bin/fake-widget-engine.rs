@@ -21,7 +21,7 @@
 //! - `wrong-version`: says hello in the version after [`VERSION`].
 //! - `silent`: never says hello and sleeps thirty seconds.
 //! - `ignore-shutdown`: reads and logs commands but neither shutdown nor the end of its input
-//!   ends it; it sleeps thirty seconds after its input ends.
+//!   ends it; it sleeps four seconds after its input ends.
 //! - `truncated-frame`: answers `Open` with a frame cut off inside its body, then exits.
 //! - `log`: writes `first line` and `second line` to its standard error, then plays `normal`.
 //! - `exit`: says hello and exits at once.
@@ -43,6 +43,11 @@ use partitur_widgets::protocol::{
 
 /// How long the scripts that should be ended by the host sleep.
 const HANG: Duration = Duration::from_secs(30);
+
+/// How long `ignore-shutdown` sleeps once its input ends: past the 2 s within which the test
+/// expects the host to have ended it, yet short enough that a host that never ends it fails that
+/// test rather than hanging it.
+const IGNORED: Duration = Duration::from_secs(4);
 
 /// How long a shutdown takes.
 const SHUTDOWN: Duration = Duration::from_millis(200);
@@ -208,7 +213,7 @@ fn ignore_shutdown(fake: &Fake) {
     while let Ok(Some(command)) = read_to_engine(&mut stdin) {
         fake.log(&format!("{command:?}"));
     }
-    std::thread::sleep(HANG); // coverage: the host kills this process after its patience
+    std::thread::sleep(IGNORED); // coverage: the host kills this process after its patience
 }
 
 fn truncated_frame(fake: &Fake) {

@@ -21,7 +21,7 @@ use partitur_core::widget_host::{
     WidgetInput, WidgetPage,
 };
 use partitur_widgets::host::{EngineError, EngineHost, Launch, Patience, start};
-use partitur_widgets::protocol::NO_SANDBOX;
+use partitur_widgets::protocol::{NO_SANDBOX, VERSION};
 use tempfile::TempDir;
 
 /// How long a test waits for the next event before it fails instead of hanging.
@@ -106,10 +106,14 @@ fn gone(log: &[String]) -> bool {
     !partitur_core::testing::alive(&pid(log))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn gone(log: &[String]) -> bool {
-    let _ = pid(log);
-    true
+    let pid = pid(log);
+    let listed = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("tasklist runs");
+    !String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
 }
 
 fn next_event(events: &mut UnboundedReceiver<WidgetHostEvent>) -> WidgetHostEvent {
@@ -238,26 +242,22 @@ fn a_frame_of_another_size_replaces_the_picture() {
 fn frames_coalesce_while_the_reader_waits() {
     let mut fake = Fake::start("paint-fast");
     fake.host().open(VIEW, page()).unwrap();
+    let latest = frame_of(fake.next());
+    // The fake goes on painting; none of those paints is announced while this one waits.
     std::thread::sleep(Duration::from_millis(200));
-    let mut frames = Vec::new();
-    while let Ok(event) = fake.events.try_recv() {
-        frames.push(frame_of(event));
+    if let Ok(event) = fake.events.try_recv() {
+        panic!("a second event waits: {event:?}");
     }
-    assert_eq!(
-        frames.len(),
-        1,
-        "one frame event waits, however fast it paints"
-    );
     // Once taken, the next paint is announced again.
-    frames[0].take().unwrap();
-    assert_eq!(frame_of(fake.next()), frames[0]);
+    latest.take().unwrap();
+    assert_eq!(frame_of(fake.next()), latest);
 }
 
 #[test]
 fn a_wrong_version_fails_the_start() {
     let dir = tempfile::tempdir().unwrap();
     let error = start(launch("wrong-version", &dir.path().join("log"), &[])).unwrap_err();
-    assert_eq!(error, EngineError::Version(2));
+    assert_eq!(error, EngineError::Version(VERSION + 1));
     assert!(gone(&read_log(dir.path())));
 }
 

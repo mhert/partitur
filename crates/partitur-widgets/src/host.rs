@@ -5,8 +5,8 @@
 //! Windows, with its standard streams piped and Partitur's environment. It blocks until the
 //! helper's [`FromEngine::Hello`] arrives, so it belongs on a thread of its own. A helper that
 //! cannot be spawned, says something else first, ends before its hello, sends none within
-//! [`Patience::hello`] or speaks another [`VERSION`] fails the start, and its whole process
-//! tree is ended.
+//! [`Patience::hello`] or speaks another [`VERSION`] fails the start, and so does a thread of
+//! the host that cannot start. Either way the helper's whole process tree is ended.
 //!
 //! Three threads carry the traffic, so the UI never waits on the pipe. `widget-engine-out`
 //! writes the commands the [`WidgetHost`] methods queue, one to one, in the order they were
@@ -19,8 +19,9 @@
 //! to Partitur's log, at the info level under the target `partitur_widgets::engine`.
 //!
 //! A command queued once the helper's input is gone fails with [`WidgetHostError::Send`].
-//! Dropping the host sends [`ToEngine::Shutdown`], gives the helper [`Patience::close`] to
-//! exit, then ends its whole process tree, whatever is left of it, and joins the threads.
+//! Dropping the host sends [`ToEngine::Shutdown`] and gives the helper [`Patience::close`] to
+//! exit. A helper still running then has its whole process tree ended. Then the threads are
+//! joined.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -133,44 +134,71 @@ pub fn start(
     own_group(&mut command);
     let spawn_error =
         |error: std::io::Error| EngineError::Spawn(format!("{}: {error}", program.display()));
-    let mut child = command.spawn().map_err(spawn_error)?;
-    // Each stream was asked to be piped, so each is there; and should a thread not start, the
-    // helper ends by itself once its input closes, which it does when `start` returns.
-    let (stdin, stdout, stderr) =
-        pipes(&mut child).ok_or_else(|| EngineError::Spawn("no pipes".into()))?;
+    let child = command.spawn().map_err(spawn_error)?;
+    let mut starting = Starting {
+        child,
+        threads: Vec::new(),
+    };
+    // Each stream was asked to be piped, so each is there.
+    let pipes = pipes(&mut starting.child).ok_or_else(|| EngineError::Spawn("no pipes".into()));
+    let (stdin, stdout, stderr) = starting.checked(pipes)?;
     let views = Views::default();
     let (events, receiver) = unbounded();
     let (hello, greeted) = mpsc::sync_channel(1);
-    let log = spawn("widget-engine-log", move || forward_log(stderr))?;
+    starting.thread("widget-engine-log", move || forward_log(stderr))?;
     let shared = Arc::clone(&views);
-    let read = move || read_events(stdout, &hello, &shared, &events);
-    let reader = spawn("widget-engine-in", read)?;
+    starting.thread("widget-engine-in", move || {
+        read_events(stdout, &hello, &shared, &events);
+    })?;
     let greeting = greeted.recv_timeout(patience.hello).unwrap_or_else(|_| {
         Err(EngineError::NoHello(format!(
             "none within {:?}",
             patience.hello
         )))
     });
-    let sandboxed = match greeting {
-        Ok(sandboxed) => sandboxed,
-        Err(error) => {
-            kill_tree(&mut child);
-            let _ = reader.join();
-            let _ = log.join();
-            return Err(error);
-        }
-    };
+    let sandboxed = starting.checked(greeting)?;
     let (commands, queued) = mpsc::channel();
-    let writer = spawn("widget-engine-out", move || write_commands(stdin, &queued))?;
+    starting.thread("widget-engine-out", move || write_commands(stdin, &queued))?;
     let host = EngineHost {
         commands,
         views,
         sandboxed,
-        child,
+        child: starting.child,
         close: patience.close,
-        threads: vec![writer, reader, log],
+        threads: starting.threads,
     };
     Ok((host, receiver))
+}
+
+/// A helper being started and the threads started for it so far.
+struct Starting {
+    child: Child,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl Starting {
+    /// Passes `result` on, after ending the helper's whole process tree and joining the threads
+    /// when it is an error. Once the helper is gone its streams end, and with them the threads.
+    fn checked<T>(&mut self, result: Result<T, EngineError>) -> Result<T, EngineError> {
+        if result.is_err() {
+            kill_tree(&mut self.child);
+            for thread in self.threads.drain(..) {
+                let _ = thread.join();
+            }
+        }
+        result
+    }
+
+    /// Starts a thread named `name` running `run`, or ends the helper when it cannot start.
+    fn thread(
+        &mut self,
+        name: &str,
+        run: impl FnOnce() + Send + 'static,
+    ) -> Result<(), EngineError> {
+        let thread = self.checked(spawn(name, run))?;
+        self.threads.push(thread);
+        Ok(())
+    }
 }
 
 /// The helper's three piped streams.
@@ -278,15 +306,16 @@ fn lock(views: &Views) -> MutexGuard<'_, HashMap<ViewId, LatestFrame>> {
     views.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Waits up to `patience` for `child` to exit.
-fn wait_for_exit(child: &mut Child, patience: Duration) {
+/// Waits up to `patience` for `child` to exit, and says whether it did.
+fn wait_for_exit(child: &mut Child, patience: Duration) -> bool {
     let deadline = Instant::now() + patience;
     while !deadline.saturating_duration_since(Instant::now()).is_zero() {
         if let Ok(Some(_)) = child.try_wait() {
-            return;
+            return true;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    false
 }
 
 impl EngineHost {
@@ -351,8 +380,10 @@ impl Drop for EngineHost {
         let _ = self.commands.send(ToEngine::Shutdown);
         // The writer ends once the queue closes, after the commands still in it.
         drop(std::mem::replace(&mut self.commands, mpsc::channel().0));
-        wait_for_exit(&mut self.child, self.close);
-        kill_tree(&mut self.child);
+        // A helper that exited has been reaped, and its pid may already name another process.
+        if !wait_for_exit(&mut self.child, self.close) {
+            kill_tree(&mut self.child);
+        }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
@@ -495,6 +526,28 @@ mod tests {
         assert_eq!(latest.picture().bgra, vec![2; 4]);
         latest.take().unwrap();
         assert_eq!(delivered(frame(VIEW, 3), &views).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_while_starting_ends_the_helper_and_joins_its_threads() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let child = own_group(&mut command).spawn().unwrap();
+        let joined = Arc::new(Mutex::new(false));
+        let ran = Arc::clone(&joined);
+        let mut starting = Starting {
+            child,
+            threads: Vec::new(),
+        };
+        starting
+            .thread("test-thread", move || *ran.lock().unwrap() = true)
+            .unwrap();
+        let error = EngineError::Spawn("no thread".into());
+        assert_eq!(starting.checked::<()>(Err(error.clone())), Err(error));
+        assert!(starting.threads.is_empty());
+        assert!(*joined.lock().unwrap());
+        assert!(starting.child.try_wait().unwrap().is_some());
     }
 
     #[test]
