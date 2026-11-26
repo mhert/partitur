@@ -2719,7 +2719,7 @@ fn a_turn_the_agent_starts_while_a_late_request_waits_takes_the_request() {
     orchestrate(&mut fixture, &child);
 
     send(&mut fixture, &child, AgentUpdate::TurnStarted);
-    assert_eq!(status(&fixture.app, &child), Status::Running);
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
     fixture
         .app
         .answer_permission(child.clone(), PermissionId(1), None)
@@ -2736,6 +2736,29 @@ fn a_turn_the_agent_starts_while_a_late_request_waits_takes_the_request() {
     );
     assert_eq!(deferred(&fixture.app, &child), 0);
     assert_eq!(prompts(&fixture.backend, &child).len(), 2);
+}
+
+#[test]
+fn an_automatic_answer_after_a_stop_outside_a_turn_sends_no_deferred_prompt() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    finish(&mut fixture, &child, "done");
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+    orchestrate(&mut fixture, &child);
+    fixture.app.stop_children(&parent).unwrap();
+    assert_eq!(status(&fixture.app, &child), Status::Done);
+    fixture.app.set_auto_allow(child.clone(), true).unwrap();
+
+    send(&mut fixture, &child, asking(2, "Read lib.rs"));
+
+    assert_eq!(responses_to(&fixture, &child), 2);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 1);
+    assert_eq!(status(&fixture.app, &child), Status::Done);
 }
 
 /// How many permission answers went to `session`'s agent.

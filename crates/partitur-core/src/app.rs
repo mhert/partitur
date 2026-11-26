@@ -1397,7 +1397,11 @@ impl App {
         if let Some(Closing { by, decider }) = closing {
             self.close_gate(id, by, decider)?;
         }
-        self.live_entry(id).turn_origin = Some(origin);
+        let live = self.live_entry(id);
+        live.turn_origin = Some(origin);
+        // A request still waiting here, such as one whose paths are being checked, belongs to
+        // the turn now.
+        live.after_permissions = None;
         for record in records {
             self.apply_update(id, record)?;
         }
@@ -1459,12 +1463,12 @@ impl App {
 
     /// Stops the session's turn as [`cancel`](Self::cancel) describes. A child whose prompt
     /// is dropped before it went out reports its turn to its parent as cancelled; prompts
-    /// Partitur deferred for the session stay queued.
+    /// Partitur deferred for the session stay queued, and settling a permission request that
+    /// comes later sends none of them until a turn ends otherwise.
     fn stop_turn(&mut self, id: SessionId) -> Result<(), AppError> {
-        if self
-            .live_mut(&id)
-            .is_some_and(|live| !std::mem::take(&mut live.queued).is_empty())
-        {
+        let live = self.live_entry(&id);
+        live.stopped = true;
+        if !std::mem::take(&mut live.queued).is_empty() {
             self.set_status(id.clone(), Status::Idle)?;
             return self.settle_turn(&id, ChildOutcome::Ended(StopReason::Cancelled), false);
         }
@@ -1568,7 +1572,7 @@ impl App {
         }))
     }
 
-    /// Whether the session's latest turn ended as cancelled.
+    /// Whether the session's latest turn was stopped or ended as cancelled.
     fn stopped(&self, session: &SessionId) -> bool {
         self.live(session).is_some_and(|live| live.stopped)
     }
@@ -2102,7 +2106,7 @@ impl App {
     /// [`Running`](Status::Running) and is recorded in the transcript; the same signal while
     /// the session is already in a turn is ignored, since that turn is already running. While
     /// only requests that outlasted a turn, or came after it, wait, it starts a turn they then
-    /// belong to: answering them lets it run on.
+    /// belong to: the session waits for you until they are answered, and then runs on.
     ///
     /// An update or a close for a session that is not attached comes from a connection the
     /// session no longer uses (it switched backends, or its connection already closed) and
@@ -2718,7 +2722,12 @@ impl App {
                 let live = self.live_entry(session);
                 live.turn_origin = Some(TurnOrigin::Agent);
                 live.after_permissions = None;
-                self.set_status(session.clone(), Status::Running)
+                let status = if self.permissions.any_of(session) {
+                    Status::WaitingForYou
+                } else {
+                    Status::Running
+                };
+                self.set_status(session.clone(), status)
             }
             TranscriptRecord::TurnEnded(reason) => {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))

@@ -9,8 +9,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::app::scheduler::Generated;
 use crate::app::test_support::{
-    Family, Fixture, answer_files, family, read_request, select, send, status,
+    Family, Fixture, answer_files, family, prompts, read_request, select, send, status,
 };
 use crate::backend::{AgentUpdate, PermissionKind, PermissionOption, StopReason, ToolKind};
 use crate::files::{FilesError, FilesEvent, FilesQuery};
@@ -345,6 +346,36 @@ fn a_request_still_resolving_at_the_turn_end_is_decided_afterwards() {
     assert_eq!(responses(fixture), [allowed(&parent)]);
     assert!(!fixture.app.has_waiting_permission(&parent));
     assert_eq!(status(&fixture.app, &parent), Status::Done);
+}
+
+#[test]
+fn a_late_request_still_resolving_when_a_turn_starts_belongs_to_that_turn() {
+    let (mut family, worktree) = mid_turn();
+    let parent = family.parent.clone();
+    let fixture = &mut family.fixture;
+    send(
+        fixture,
+        &parent,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    send(
+        fixture,
+        &parent,
+        request_at(ToolKind::Read, &[worktree.join("src/main.rs")]),
+    );
+    assert_eq!(status(&fixture.app, &parent), Status::Done);
+    assert!(
+        fixture
+            .app
+            .deliver(&parent, Generated::Wake("Go on".into()))
+            .unwrap()
+    );
+
+    answer_files(fixture);
+
+    assert_eq!(responses(fixture), [allowed(&parent)]);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 2);
 }
 
 #[test]

@@ -350,7 +350,9 @@ A session that asks you to allow a tool call shows `waiting for you` until you a
 
 - A request still open when the agent's turn ends stays open, and the session keeps waiting
   for you. A request that arrives after the turn ended, as a subagent's can, makes the
-  session wait for you too.
+  session wait for you too, once it asks you: an orchestrator's read or edit whose paths
+  Partitur is still checking leaves the session as it is until it is decided, and a turn
+  that starts meanwhile takes it over.
 - Once every open request is answered, the session goes back to the status it had: `done`,
   or `waiting for you` while a proposal, a [workflow gate](workflows.md#gates) or a
   [question](#questions) is open at that moment. A prompt Partitur generated for it meanwhile,
