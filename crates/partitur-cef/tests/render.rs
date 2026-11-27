@@ -1,21 +1,27 @@
 //! Renders real widget pages in CEF and checks what comes back through the widget host port.
 //!
-//! The binary has its own `main` because CEF starts its helper processes by running this same
-//! binary again; `partitur_cef::subprocess` hands those over to CEF before anything else runs.
-//! CEF can be started only once per process, so one host serves every test, each on a view of its
-//! own. The tests need a display: without `DISPLAY` or `WAYLAND_DISPLAY` they are skipped with a
-//! printed reason, and CI runs them under `xvfb-run`. On macOS, where CEF widgets are not
-//! supported yet, they are skipped as well.
+//! The tests drive the real widget engine, the `partitur-widget-engine` helper, through
+//! [`EngineHost`], as Partitur does. Cargo hands a package's tests the path of that package's own
+//! binaries only, and artifact dependencies are not stable, so the helper is looked for beside the
+//! folder of this test binary (`target/<profile>/`, where Cargo puts binaries and CEF's runtime)
+//! and has to be built first: `cargo build -p partitur-widget-engine`, as CI does. One helper
+//! serves every test, each on a view of its own, which keeps the run to one CEF start.
+//!
+//! On Linux the tests need a display: without `DISPLAY` or `WAYLAND_DISPLAY` they are skipped with
+//! a printed reason, and CI runs them under `xvfb-run`. On macOS, where CEF widgets are not
+//! supported yet, they are skipped as well. The binary has its own `main` (no test harness), so
+//! that the tests run one after the other against the one helper.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
-use partitur_cef::CefWidgetHost;
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     Region, ViewId, WidgetCursor, WidgetHost, WidgetHostEvent, WidgetInput, WidgetPage,
 };
+use partitur_widgets::host::{EngineHost, Launch, Patience};
 
 /// How long a test waits for what it expects before it fails.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -24,14 +30,14 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
 
 fn main() -> ExitCode {
-    if let Some(code) = partitur_cef::subprocess() {
-        return ExitCode::from(u8::try_from(code).unwrap_or(1)); // coverage: runs in a CEF helper process
-    }
     if cfg!(target_os = "macos") {
         println!("skipping the CEF render tests: CEF widgets are not supported on macOS yet");
         return ExitCode::SUCCESS;
     }
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    if cfg!(target_os = "linux")
+        && std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
         println!("skipping the CEF render tests: neither DISPLAY nor WAYLAND_DISPLAY is set");
         return ExitCode::SUCCESS;
     }
@@ -40,10 +46,22 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
+    let program = match helper() {
+        Ok(program) => program,
+        Err(error) => {
+            println!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let launch = Launch {
+        program,
+        args: Vec::new(),
+        patience: Patience::default(),
+    };
     let tests = tests();
-    // The host lives in this block, so that CEF has shut down before the summary.
+    // The host lives in this block, so that the helper has shut down before the summary.
     let failed = {
-        let (host, mut events) = match partitur_cef::start() {
+        let (host, mut events) = match partitur_widgets::host::start(launch) {
             Ok(started) => started,
             Err(error) => {
                 println!("{error}");
@@ -64,6 +82,30 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// The helper's executable: in the folder above this test binary's `deps`, where Cargo builds
+/// the workspace's binaries.
+fn helper() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|error| format!("no path to the tests: {error}"))?;
+    let program = exe
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|dir| {
+            dir.join(format!(
+                "partitur-widget-engine{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+        })
+        .ok_or_else(|| format!("no folder above {}", exe.display()))?;
+    if program.is_file() {
+        Ok(program)
+    } else {
+        Err(format!(
+            "no widget engine at {}: build it first with `cargo build -p partitur-widget-engine`",
+            program.display()
+        ))
     }
 }
 
@@ -153,7 +195,7 @@ const TESTS: usize = 20;
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
     tests: &[(&str, Test)],
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> usize {
     let mut failed = 0;
@@ -169,7 +211,7 @@ fn run(
     failed
 }
 
-type Test = fn(&CefWidgetHost, &mut UnboundedReceiver<WidgetHostEvent>) -> Result<(), String>;
+type Test = fn(&EngineHost, &mut UnboundedReceiver<WidgetHostEvent>) -> Result<(), String>;
 
 fn page(html: &str, csp: &str) -> WidgetPage {
     WidgetPage {
@@ -365,7 +407,7 @@ fn message_containing(needle: &str) -> impl FnMut(&Seen) -> bool + '_ {
 }
 
 fn widget_posts_and_paints(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(1);
@@ -416,7 +458,7 @@ fn widget_posts_and_paints(
 }
 
 fn a_link_under_the_pointer_asks_for_the_hand(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(8);
@@ -461,7 +503,7 @@ fn a_link_under_the_pointer_asks_for_the_hand(
 }
 
 fn widget_has_cookies_and_storage_but_not_the_proxy(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(7);
@@ -498,7 +540,7 @@ fn widget_has_cookies_and_storage_but_not_the_proxy(
 }
 
 fn widget_cannot_fetch_file_urls(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(2);
@@ -525,7 +567,7 @@ fn widget_cannot_fetch_file_urls(
 }
 
 fn widget_cannot_reach_another_views_origins(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let (a, b) = (ViewId(3), ViewId(4));
@@ -572,7 +614,7 @@ fn widget_cannot_reach_another_views_origins(
 }
 
 fn a_broken_nested_frame_leaves_the_widget_standing(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(5);
@@ -613,7 +655,7 @@ fn a_broken_nested_frame_leaves_the_widget_standing(
 }
 
 fn an_animating_widget_queues_one_frame(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(6);
@@ -689,7 +731,7 @@ fn clickable(body: &str, script: &str) -> String {
 /// `linger` after that. Each click waits a while for its outcome, as the first may come before
 /// the page is laid out.
 fn click_until(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
     view: ViewId,
     html: &str,
@@ -734,7 +776,7 @@ fn click_until(
 /// That the page of `view` still answers: a post comes back as its echo, and the view never
 /// failed among `seen` nor while waiting.
 fn still_answers(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
     view: ViewId,
     seen: &[Seen],
@@ -761,7 +803,7 @@ fn is_link_to(event: &Seen, wanted: &str) -> bool {
 }
 
 fn a_clicked_link_is_handed_on_and_the_widget_stays(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(9);
@@ -785,7 +827,7 @@ fn a_clicked_link_is_handed_on_and_the_widget_stays(
 }
 
 fn a_navigation_without_a_click_is_stopped_quietly(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(10);
@@ -820,7 +862,7 @@ fn a_navigation_without_a_click_is_stopped_quietly(
 }
 
 fn a_link_to_a_new_window_is_handed_on(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(11);
@@ -837,7 +879,7 @@ fn a_link_to_a_new_window_is_handed_on(
 }
 
 fn a_window_opened_on_a_click_is_handed_on(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(12);
@@ -855,7 +897,7 @@ fn a_window_opened_on_a_click_is_handed_on(
 }
 
 fn the_wheel_scrolls_the_widget(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(13);
@@ -908,7 +950,7 @@ fn the_wheel_scrolls_the_widget(
 }
 
 fn a_nested_frame_navigates_as_the_policy_lets_it(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(14);
@@ -940,7 +982,7 @@ fn a_nested_frame_navigates_as_the_policy_lets_it(
 }
 
 fn what_the_widget_leaves_unpainted_is_transparent(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(15);
@@ -971,7 +1013,7 @@ fn what_the_widget_leaves_unpainted_is_transparent(
 }
 
 fn a_change_is_painted_as_its_damage(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(20);
@@ -1009,7 +1051,7 @@ fn a_change_is_painted_as_its_damage(
 }
 
 fn a_precise_wheel_scrolls_at_once_by_its_amount(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(16);
@@ -1096,7 +1138,7 @@ fn scroll_offsets(
 /// milliseconds apart, with no move of the pointer between them and no phase of a gesture, as
 /// the UI hands them on.
 fn stroke(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     view: ViewId,
     (x, y): (f32, f32),
     turns: u32,
@@ -1123,7 +1165,7 @@ fn stroke(
 // document, in its frame under the proxy page, scrolls by all of them, and a second stroke after
 // a pause scrolls it on.
 fn a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(17);
@@ -1174,7 +1216,7 @@ fn a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts(
 // that page would share the proxy's origin and could rewrite the page above the widget. Had it
 // loaded, it would load the widget's document once more, which then speaks up from deep down.
 fn a_nested_frame_cannot_load_the_proxy_page(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(18);
@@ -1231,7 +1273,7 @@ fn centre_is(
 }
 
 fn a_page_follows_the_theme_it_is_given(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(18);
@@ -1252,7 +1294,7 @@ fn a_page_follows_the_theme_it_is_given(
 }
 
 fn a_theme_given_before_the_browser_is_up_is_kept(
-    host: &CefWidgetHost,
+    host: &EngineHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> Result<(), String> {
     let view = ViewId(19);

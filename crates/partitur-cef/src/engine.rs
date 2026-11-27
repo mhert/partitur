@@ -1,61 +1,65 @@
-//! The CEF runtime behind [`CefWidgetHost`](crate::CefWidgetHost), on Linux and Windows.
+//! The CEF runtime of the widget engine helper, on Linux and Windows.
 //!
-//! [`start`] runs CEF on a thread of its own, `cef-main`, with CEF's multi-threaded message loop,
-//! and every [`Engine`] method only sends a command to that thread. Rendering is offscreen, the
-//! cache lives in a temporary folder made fresh for each start (a random name, mode 0700 on
-//! Unix, never a folder that was there before) and removed at shutdown, remote debugging is
-//! off, and extensions are disabled. Partitur's own executable is CEF's helper executable, so
-//! [`subprocess`] must run before anything else in the binary. It reads only the arguments before
-//! a `--`, since those after one belong to another program the binary starts, such as an adapter
-//! under `--job-run`.
+//! [`serve`] runs CEF on the helper's main thread: `cef_initialize` there with CEF's
+//! multi-threaded message loop off, then CEF's own message loop until shutdown. That thread is
+//! CEF's UI thread, and every [`Views`] command runs on it as a task: the reader of standard
+//! input and CEF's handlers queue each [`Command`] through [`Commands`], which posts one task to
+//! the UI thread whenever the queue was empty, and that task carries out everything queued by
+//! then. Nothing on the UI thread blocks; every wait is a delayed task. Rendering is offscreen,
+//! the cache lives in a temporary folder made fresh for each start (a random name, mode 0700 on
+//! Unix, never a folder that was there before) and removed at shutdown, remote debugging is off,
+//! and extensions are disabled. The helper's executable is also CEF's helper executable, so
+//! [`subprocess`] must run before anything else in it. It reads only the arguments before a
+//! `--`.
 //!
-//! The OS process sandbox is used when it works. On Linux a sandbox that cannot start aborts the
-//! whole process, so before CEF starts, the executable is run once more as a sandbox probe: that
-//! process starts CEF with the sandbox and opens a page in a renderer. When the probe fails, CEF
-//! runs with `--no-sandbox` and a warning names the reason. On Windows CEF needs its sandbox
-//! bootstrap, which Partitur does not ship (see the crate documentation), so it always runs
-//! without the sandbox and says so with the same warning.
+//! Without CEF's resources CEF aborts the whole process, so their folder is looked for first,
+//! beside the executable, one folder up and in `../lib/partitur`, and a start without one logs
+//! why and ends with exit code 1, as does a CEF that does not initialize. The helper says hello
+//! ([`FromEngine::Hello`], with the protocol version and whether CEF runs sandboxed) once CEF's
+//! browser context exists and the widget schemes are installed. A context that does not come
+//! within ten seconds ends the helper with exit code 1 at once: CEF must not be shut down before
+//! its context exists, which would crash it.
 //!
-//! Dropping the engine closes every view, waits a short while for CEF to destroy the browsers and
-//! shuts CEF down.
+//! On Linux CEF runs in the OS process sandbox unless the helper was told otherwise. A sandbox
+//! that cannot start aborts the helper; one that starts but does not work is found by the probe,
+//! which runs first unless the helper was told to skip it: before its hello the helper opens a
+//! page in a sandboxed renderer and waits up to thirty seconds for the page's message. When it
+//! comes, the probe's view closes and the hello goes out. When the page fails, or the time runs
+//! out, the helper shuts down and ends with [`PROBE_FAILED`], and Partitur starts it again
+//! without the sandbox. On Windows CEF needs its sandbox bootstrap, which Partitur does not ship
+//! yet, so it always runs without the sandbox, says so in its log and in its hello.
 //!
-//! A start whose browser context does not come within ten seconds fails, so that widgets fall
-//! back to text, but CEF is not shut down then: shutting it down before its context exists
-//! crashes the process. The `cef-main` thread waits on for the context and shuts CEF down once
-//! it comes; when it never does, CEF stays as it is until the process ends.
-//!
-//! On Linux, Chromium's browser process takes over SIGINT, SIGTERM and SIGHUP with handlers that
-//! only ask the browser to shut down, which would leave Partitur running on a Ctrl+C in its
-//! terminal or a `kill`. Once CEF has started, those signals get their default action back.
+//! [`Command::Shutdown`], from Partitur or at the end of the input, closes every view, waits for
+//! CEF to destroy the browsers, but at most five seconds, quits CEF's message loop and shuts CEF
+//! down.
 
+use std::cell::RefCell;
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cef::rc::Rc as _;
 use cef::{
     App, BrowserProcessHandler, CefString, CommandLine, ImplApp, ImplBrowserProcessHandler,
-    ImplCommandLine, LogSeverity, SchemeRegistrar, Settings, WrapApp, WrapBrowserProcessHandler,
-    execute_process, wrap_app, wrap_browser_process_handler,
+    ImplCommandLine, ImplTask, LogSeverity, SchemeRegistrar, Settings, Task, ThreadId, WrapApp,
+    WrapBrowserProcessHandler, WrapTask, execute_process, wrap_app, wrap_browser_process_handler,
+    wrap_task,
 };
-#[cfg(target_os = "linux")]
-use futures::channel::mpsc::TryRecvError;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use partitur_core::widget_bridge::WidgetTheme;
-use partitur_core::widget_host::{
-    ViewId, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
-};
+use partitur_core::widget_host::{ViewId, WidgetPage};
+use partitur_widgets::protocol::{FromEngine, PROBE_FAILED, VERSION};
 
 use crate::CefError;
 use crate::scheme;
+use crate::serve::{self, Out};
 use crate::view::{Command, Shared, Views};
 
-/// How long shutting down waits for CEF to destroy the open browsers.
-const CLOSE_PATIENCE: Duration = Duration::from_secs(5);
+/// How long shutting down waits for CEF to destroy the open browsers, and how long the helper
+/// waits after its input ended before it ends itself.
+pub(crate) const CLOSE_PATIENCE: Duration = Duration::from_secs(5);
 
 /// How long starting waits for CEF to initialize its browser context once `cef_initialize`
 /// returned.
@@ -65,14 +69,8 @@ const CONTEXT_PATIENCE: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const PROBE_PATIENCE: Duration = Duration::from_secs(30);
 
-/// How long, once the probe has ended, its last words on standard error are waited for. A helper
-/// that escaped the probe's process group may hold the pipe open for good.
-#[cfg(target_os = "linux")]
-const PROBE_WORDS_PATIENCE: Duration = Duration::from_secs(1);
-
-/// The argument that runs this executable as the sandbox probe.
-#[cfg(target_os = "linux")]
-const SANDBOX_PROBE: &str = "--partitur-cef-sandbox-probe";
+/// The view of the sandbox probe, one Partitur does not use.
+const PROBE_VIEW: ViewId = ViewId(u64::MAX);
 
 /// The switches the browser process starts with, each with its value if it has one. Extensions
 /// stay off, so that none installed on the system (some desktops put theirs into Chromium's
@@ -85,454 +83,448 @@ const BROWSER_SWITCHES: &[(&str, Option<&str>)] = &[
     ("ozone-platform", Some("headless")),
 ];
 
-/// Whether CEF was started in this process already; it can be started only once.
-static STARTED: AtomicBool = AtomicBool::new(false);
-
 /// What a process was started as, read from its arguments.
 #[derive(Debug, PartialEq, Eq)]
 enum Started {
     /// A CEF helper: an argument `--type=…`.
     Helper,
-    /// The sandbox probe: the argument [`SANDBOX_PROBE`].
-    #[cfg(target_os = "linux")]
-    Probe,
-    /// Neither.
+    /// Not one.
     Other,
 }
 
 /// What `args` (the program's arguments, without its name) start this process as. Only the
-/// arguments before a `--` count: after it come another program's, such as the adapter's under
-/// `partitur --job-run -- <program> …`, which may well carry a `--type=` of their own.
+/// arguments before a `--` count: after it come another program's, which may well carry a
+/// `--type=` of their own.
 fn started_as<I>(args: I) -> Started
 where
     I: IntoIterator,
     I::Item: AsRef<std::ffi::OsStr>,
 {
-    let own: Vec<String> = args
+    let helper = args
         .into_iter()
         .map(|arg| arg.as_ref().to_string_lossy().into_owned())
         .take_while(|arg| arg != "--")
-        .collect();
-    if own.iter().any(|arg| arg.starts_with("--type=")) {
-        return Started::Helper;
+        .any(|arg| arg.starts_with("--type="));
+    if helper {
+        Started::Helper
+    } else {
+        Started::Other
     }
-    #[cfg(target_os = "linux")]
-    if own.iter().any(|arg| arg == SANDBOX_PROBE) {
-        return Started::Probe;
-    }
-    Started::Other
 }
 
-/// Runs this process as a CEF helper or as the sandbox probe when it was started as one.
+/// Runs this process as a CEF helper when it was started as one.
 pub(crate) fn subprocess() -> Option<i32> {
     match started_as(std::env::args_os().skip(1)) {
-        Started::Helper => Some(run_helper()), // coverage: runs in a CEF helper process
-        #[cfg(target_os = "linux")]
-        Started::Probe => Some(run_probe_process()), // coverage: runs in the sandbox probe process
+        Started::Helper => Some(run_helper()),
         Started::Other => None,
     }
 }
 
 /// Hands a helper process over to CEF.
 fn run_helper() -> i32 {
-    let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0); // coverage: runs in a CEF helper process
-    let args = cef::args::Args::new(); // coverage: runs in a CEF helper process
-    let main_args = args.as_main_args(); // coverage: runs in a CEF helper process
-    let mut app = WidgetApp::new(None); // coverage: runs in a CEF helper process
-    let info = std::ptr::null_mut(); // coverage: runs in a CEF helper process
-    execute_process(Some(main_args), Some(&mut app), info) // coverage: runs in a CEF helper process
+    let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+    let args = cef::args::Args::new();
+    let main_args = args.as_main_args();
+    let mut app = WidgetApp::new(false);
+    let info = std::ptr::null_mut();
+    execute_process(Some(main_args), Some(&mut app), info)
 }
 
-/// The sandbox probe: starts CEF with the sandbox, opens a page that posts a message, and exits
-/// with 0 once the message arrives. A sandbox that cannot start aborts this process instead.
-#[cfg(target_os = "linux")]
-fn run_probe_process() -> i32 {
-    let Ok((engine, mut events)) = start_with(true) else {
-        return 1; // coverage: runs in the sandbox probe process
-    }; // coverage: runs in the sandbox probe process
-    let page = WidgetPage {
-        html: "<script>parent.postMessage({probe: true}, '*')</script>".into(), // coverage: runs in the sandbox probe process
-        csp: "default-src 'none'; script-src 'unsafe-inline'".into(), // coverage: runs in the sandbox probe process
-        theme: WidgetTheme::Light, // coverage: runs in the sandbox probe process
-    }; // coverage: runs in the sandbox probe process
-    if engine.send(Command::Open(ViewId(0), page)).is_err() {
-        return 1; // coverage: runs in the sandbox probe process
-    } // coverage: runs in the sandbox probe process
-    let deadline = Instant::now() + PROBE_PATIENCE; // coverage: runs in the sandbox probe process
-    while Instant::now() < deadline {
-        match events.try_recv() {
-            Ok(WidgetHostEvent::Message { .. }) => return 0, // coverage: runs in the sandbox probe process
-            Ok(WidgetHostEvent::Failed { .. }) | Err(TryRecvError::Closed) => return 1, // coverage: runs in the sandbox probe process
-            Ok(
-                WidgetHostEvent::Frame { .. }
-                | WidgetHostEvent::Cursor { .. }
-                | WidgetHostEvent::OpenLink { .. }
-                | WidgetHostEvent::EngineLost
-                | WidgetHostEvent::EngineBack
-                | WidgetHostEvent::EngineStopped { .. },
-            ) => {} // coverage: runs in the sandbox probe process
-            Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)), // coverage: runs in the sandbox probe process
-        } // coverage: runs in the sandbox probe process
-    } // coverage: runs in the sandbox probe process
-    1 // coverage: runs in the sandbox probe process
+/// Whether CEF runs in the OS process sandbox when `asked` is whether it should: on Linux as
+/// asked.
+#[cfg(not(windows))]
+fn sandboxed(asked: bool) -> bool {
+    asked
 }
 
-/// Runs `command` as a sandbox probe and waits up to `patience` for it: `Ok` when it exits
-/// successfully, otherwise the reason, with the last line it wrote to standard error.
-///
-/// The probe runs in a process group of its own, and when it fails or overstays `patience` the
-/// whole group is killed, CEF's helpers with it. Its last words are then waited for only
-/// [`PROBE_WORDS_PATIENCE`] long, so that a helper which left the group and still holds standard
-/// error cannot hold up the start either.
-#[cfg(target_os = "linux")]
-fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(), String> {
-    use std::io::BufRead as _;
-    use std::process::Stdio;
-
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = partitur_core::process::own_group(&mut command)
-        .spawn()
-        .map_err(|error| format!("the sandbox probe did not start: {error}"))?;
-    let (lines, words) = mpsc::channel();
-    if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                if lines.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+/// Whether CEF runs in the OS process sandbox: never on Windows, where cef-rs sandboxes only
+/// through CEF's bootstrap executable, which Partitur does not ship yet.
+#[cfg(windows)]
+fn sandboxed(asked: bool) -> bool {
+    if asked {
+        tracing::warn!(
+            "CEF runs without the process sandbox: on Windows CEF is sandboxed only through its \
+             bootstrap executable, which Partitur does not ship"
+        );
     }
-    let deadline = Instant::now() + patience;
-    let outcome = loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break Ok(()),
-            Ok(Some(status)) => break Err(format!("the sandbox probe failed ({status})")),
-            Ok(None) if Instant::now() >= deadline => {
-                break Err(format!(
-                    "the sandbox probe did not finish within {patience:?}"
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => break Err(format!("the sandbox probe could not be watched: {error}")),
-        }
-    };
-    if outcome.is_err() {
-        partitur_core::process::kill_tree(&mut child);
-    }
-    let until = Instant::now() + PROBE_WORDS_PATIENCE;
-    let mut said = None;
-    while let Ok(line) = words.recv_timeout(until.saturating_duration_since(Instant::now())) {
-        if !line.trim().is_empty() {
-            said = Some(line);
-        }
-    }
-    outcome.map_err(|reason| match said {
-        Some(line) => format!("{reason}: {line}"),
-        None => reason,
-    })
+    false
 }
 
-/// Why CEF must run without the OS process sandbox here, or `None` when the sandbox works.
-#[cfg(target_os = "linux")]
-fn sandbox_blocker() -> Option<String> {
+/// Runs the widget engine until it is shut down, with the OS process sandbox when `sandbox`
+/// holds and, on Linux, the sandbox probe first when `probe` holds too; see the module
+/// documentation. Returns the exit code: 0, 1 when CEF did not start, or [`PROBE_FAILED`].
+pub(crate) fn serve(sandbox: bool, probe: bool) -> i32 {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(error) => return Some(format!("no path to this executable: {error}")),
+        Err(error) => {
+            tracing::error!("no path to the widget engine's executable: {error}");
+            return 1;
+        }
     };
-    let mut command = std::process::Command::new(exe);
-    command.arg(SANDBOX_PROBE);
-    run_probe(command, PROBE_PATIENCE).err()
-}
-
-/// Why CEF must run without the OS process sandbox here: on Windows cef-rs sandboxes only
-/// through CEF's bootstrap executable, which Partitur does not ship.
-#[cfg(not(target_os = "linux"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the Linux twin returns `None` when its sandbox probe succeeds"
-)]
-fn sandbox_blocker() -> Option<String> {
-    Some(WINDOWS_BLOCKER.into())
-}
-
-/// Why CEF runs without the OS process sandbox on Windows.
-#[cfg(not(target_os = "linux"))]
-const WINDOWS_BLOCKER: &str = "on Windows CEF is sandboxed only through its bootstrap executable, which Partitur does not ship";
-
-/// Starts CEF, sandboxed when the sandbox works, and returns the engine and its events.
-///
-/// Without its resources CEF aborts the whole process, so their folder is looked for first, and
-/// a start without one fails instead.
-pub(crate) fn start() -> Result<(Engine, UnboundedReceiver<WidgetHostEvent>), CefError> {
-    let exe = std::env::current_exe()
-        .map_err(|error| CefError::Initialize(format!("no path to this executable: {error}")))?;
     if resources_dir(&exe).is_none() {
-        return Err(CefError::Initialize(format!(
+        tracing::error!(
             "CEF's resources are neither beside {} nor one folder up nor in ../lib/partitur",
             exe.display()
-        )));
+        );
+        return 1;
     }
-    let blocker = sandbox_blocker();
-    if let Some(reason) = &blocker {
-        tracing::warn!("CEF runs without the process sandbox: {reason}");
-    }
-    start_with(blocker.is_none())
-}
-
-/// Starts CEF on the `cef-main` thread, with the OS process sandbox when `sandbox` holds.
-fn start_with(sandbox: bool) -> Result<(Engine, UnboundedReceiver<WidgetHostEvent>), CefError> {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return Err(CefError::Initialize(
-            "CEF was already started in this process".into(),
-        ));
-    }
-    let (events, receiver) = unbounded();
-    let (commands, incoming) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    let thread = {
-        let commands = commands.clone();
-        std::thread::Builder::new()
-            .name("cef-main".into())
-            .spawn(move || cef_main(&incoming, commands, events, &ready, sandbox))
-            .map_err(|error| CefError::Thread(error.to_string()))?
-    };
-    let outcome = started
-        .recv()
-        .unwrap_or_else(|_| Err(CefError::Thread("it stopped before CEF started".into())));
-    match outcome {
-        Ok(()) => Ok((
-            Engine {
-                commands,
-                thread: Some(thread),
-                sandboxed: sandbox,
-            },
-            receiver,
-        )),
-        // The thread is not joined: after a context that is late, it waits on for the context
-        // before it shuts CEF down, and it may wait until the process ends.
-        Err(error) => {
-            drop(thread);
-            Err(error)
-        }
-    }
-}
-
-/// The handle to the running CEF: the way to the `cef-main` thread.
-pub(crate) struct Engine {
-    commands: Sender<Command>,
-    thread: Option<JoinHandle<()>>,
-    sandboxed: bool,
-}
-
-impl Engine {
-    fn send(&self, command: Command) -> Result<(), WidgetHostError> {
-        self.commands
-            .send(command)
-            .map_err(|_| WidgetHostError::Send("the CEF thread has stopped".into()))
-    }
-
-    pub(crate) fn sandboxed(&self) -> bool {
-        self.sandboxed
-    }
-
-    pub(crate) fn open(&self, view: ViewId, page: WidgetPage) -> Result<(), WidgetHostError> {
-        self.send(Command::Open(view, page))
-    }
-
-    pub(crate) fn post(&self, view: ViewId, json: String) -> Result<(), WidgetHostError> {
-        self.send(Command::Post(view, json))
-    }
-
-    pub(crate) fn resize(
-        &self,
-        view: ViewId,
-        width: u32,
-        height: u32,
-        scale: f32,
-    ) -> Result<(), WidgetHostError> {
-        self.send(Command::Resize(view, width, height, scale))
-    }
-
-    pub(crate) fn set_visible(&self, view: ViewId, visible: bool) -> Result<(), WidgetHostError> {
-        self.send(Command::SetVisible(view, visible))
-    }
-
-    pub(crate) fn input(&self, view: ViewId, input: WidgetInput) -> Result<(), WidgetHostError> {
-        self.send(Command::Input(view, input))
-    }
-
-    pub(crate) fn set_theme(
-        &self,
-        view: ViewId,
-        theme: WidgetTheme,
-    ) -> Result<(), WidgetHostError> {
-        self.send(Command::SetTheme(view, theme))
-    }
-
-    pub(crate) fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {
-        self.send(Command::Close(view))
-    }
-}
-
-impl Drop for Engine {
-    fn drop(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// The body of the `cef-main` thread: starts CEF, carries out commands until
-/// [`Command::Shutdown`], then closes every view and shuts CEF down.
-fn cef_main(
-    incoming: &Receiver<Command>,
-    commands: Sender<Command>,
-    events: UnboundedSender<WidgetHostEvent>,
-    ready: &Sender<Result<(), CefError>>,
-    sandbox: bool,
-) {
+    let sandbox = sandboxed(sandbox);
+    let probe = cfg!(target_os = "linux") && sandbox && probe;
     let cache = match CacheDir::create() {
         Ok(cache) => cache,
         Err(error) => {
-            let _ = ready.send(Err(CefError::Initialize(format!(
-                "no cache folder: {error}"
-            ))));
-            return;
+            tracing::error!("CEF has no cache folder: {error}");
+            return 1;
         }
     };
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let settings = match settings(cache.path(), sandbox) {
         Ok(settings) => settings,
         Err(error) => {
-            let _ = ready.send(Err(error));
-            return;
+            tracing::error!("{error}");
+            return 1;
         }
     };
+    let (out, outgoing) = mpsc::channel();
+    let writer = match serve::writer(outgoing) {
+        Ok(writer) => writer,
+        Err(error) => {
+            tracing::error!("the widget engine's output has no thread: {error}");
+            return 1;
+        }
+    };
+    let (queue, incoming) = mpsc::channel();
+    let commands = Commands::new(queue);
+    let shared = Arc::new(Shared {
+        out: out.clone(),
+        commands: commands.clone(),
+        pages: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        owners: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        probing: AtomicBool::new(false),
+    });
+    LOOP.with(|cell| {
+        *cell.borrow_mut() = Some(Loop::new(incoming, shared, sandbox, probe));
+    });
     let args = cef::args::Args::new();
-    let (initialized, context) = mpsc::channel();
-    let mut app = WidgetApp::new(Some(initialized));
-    if cef::initialize(
+    let mut app = WidgetApp::new(true);
+    let exit = if cef::initialize(
         Some(args.as_main_args()),
         Some(&settings),
         Some(&mut app),
         std::ptr::null_mut(),
-    ) != 1
+    ) == 1
     {
-        let _ = ready.send(Err(CefError::Initialize(format!(
-            "cef_initialize failed with exit code {}",
+        run(commands)
+    } else {
+        tracing::error!(
+            "CEF did not start: cef_initialize failed with exit code {}",
             cef::get_exit_code()
-        ))));
-        return;
-    }
-    // Views open only on an initialized context, so the start is over only then. A context
-    // that is late fails the start at once, so that widgets fall back to text, but CEF is shut
-    // down only once the context is there: shutting it down before crashes the process.
-    let give_up = || {
-        let _ = ready.send(Err(CefError::Initialize(format!(
-            "CEF did not initialize its context within {CONTEXT_PATIENCE:?}"
-        ))));
+        );
+        LOOP.with(|cell| cell.borrow_mut().take());
+        1
     };
-    match await_context(&context, CONTEXT_PATIENCE, give_up) {
-        Context::InTime => {}
-        Context::Late => {
-            cef::shutdown();
-            return;
-        }
-        // CEF let go of the handler without a context; it is left as it is until the process
-        // ends.
-        Context::Never => return,
-    }
-    #[cfg(target_os = "linux")]
-    restore_termination_signals();
-    let shared = Arc::new(Shared {
-        events,
-        commands,
-        pages: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        owners: Arc::new(Mutex::new(std::collections::HashMap::new())),
-    });
-    if !scheme::install(&shared.pages, &shared.owners, &shared.events) {
-        cef::shutdown();
-        let _ = ready.send(Err(CefError::Initialize(
-            "the widget schemes could not be registered".into(),
-        )));
-        return;
-    }
-    let _ = ready.send(Ok(()));
-
-    let mut views = Views::new(shared);
-    while let Ok(command) = incoming.recv() {
-        if matches!(command, Command::Shutdown) {
-            break;
-        }
-        views.handle(command);
-    }
-    views.close_all();
-    let deadline = Instant::now() + CLOSE_PATIENCE;
-    while views.has_browsers() {
-        match incoming.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(command) => views.handle(command),
-            Err(_) => break,
-        }
-    }
-    cef::shutdown();
     drop(cache);
+    let _ = out.send(Out::End);
+    let _ = writer.join();
+    exit
 }
 
-/// How CEF's browser context came, as [`await_context`] waited for it.
-#[derive(Debug, PartialEq, Eq)]
-enum Context {
-    /// Within the patience.
-    InTime,
-    /// After it: the start had failed meanwhile.
-    Late,
-    /// Never: CEF dropped the handler that would have reported it.
-    Never,
+/// Runs CEF's message loop once CEF is initialized, until the loop quits, and shuts CEF down;
+/// returns the exit code.
+fn run(commands: Commands) -> i32 {
+    // Without the reader nothing could ever shut the helper down; CEF has no context yet, so it
+    // must not be shut down either.
+    if let Err(error) = serve::reader(commands) {
+        tracing::error!("the widget engine's input has no thread: {error}");
+        std::process::exit(1);
+    }
+    post(Job::ContextLate, CONTEXT_PATIENCE);
+    cef::run_message_loop();
+    // The views, and the browsers they hold, go before CEF does.
+    let exit = LOOP
+        .with(|cell| cell.borrow_mut().take())
+        .map_or(1, |done| done.exit);
+    cef::shutdown();
+    exit
 }
 
-/// Waits for CEF's browser context on `context`. When it has not come within `patience`,
-/// `give_up` runs at once, and the wait goes on without a limit, since CEF must not be shut
-/// down before its context exists; the thread that waits is then never joined.
-fn await_context(context: &Receiver<()>, patience: Duration, give_up: impl FnOnce()) -> Context {
-    match context.recv_timeout(patience) {
-        Ok(()) => Context::InTime,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            give_up();
-            Context::Never
+/// The way to CEF's UI thread: queues a command and wakes the thread for it.
+#[derive(Clone)]
+pub(crate) struct Commands {
+    queue: Sender<Command>,
+    /// Whether a task that carries out the queue is posted and has not started yet.
+    posted: Arc<AtomicBool>,
+}
+
+impl Commands {
+    fn new(queue: Sender<Command>) -> Self {
+        Self {
+            queue,
+            posted: Arc::new(AtomicBool::new(false)),
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            give_up();
-            match context.recv() {
-                Ok(()) => Context::Late,
-                Err(_) => Context::Never,
+    }
+
+    /// Queues `command` for the UI thread, posting the task that carries out the queue unless
+    /// one is posted already.
+    pub(crate) fn send(&self, command: Command) {
+        if self.queue.send(command).is_ok()
+            && !self.posted.swap(true, Ordering::SeqCst)
+            && !post(Job::Drain, Duration::ZERO)
+        {
+            self.posted.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+/// What a task posted to the UI thread does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Job {
+    /// Carries out every queued command.
+    Drain,
+    /// CEF's browser context is initialized.
+    Context,
+    /// The context's patience ran out.
+    ContextLate,
+    /// The probe's patience ran out.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ProbeLate,
+    /// The patience for the browsers to close ran out.
+    CloseLate,
+}
+
+/// Posts `job` to the UI thread, to run after `delay`; returns whether CEF took it.
+fn post(job: Job, delay: Duration) -> bool {
+    let mut task = UiTask::new(job);
+    let posted = if delay.is_zero() {
+        cef::post_task(ThreadId::UI, Some(&mut task))
+    } else {
+        let delay = i64::try_from(delay.as_millis()).unwrap_or(i64::MAX);
+        cef::post_delayed_task(ThreadId::UI, Some(&mut task), delay)
+    };
+    posted == 1
+}
+
+/// Runs `job` on the loop. When the loop is busy, as it is when CEF calls a handler from within
+/// a job, the job is posted to run once that one returns.
+fn run_job(job: Job) {
+    LOOP.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut running) => {
+            if let Some(running) = running.as_mut() {
+                running.run(job);
+            }
+        }
+        Err(_) => {
+            post(job, Duration::ZERO);
+        }
+    });
+}
+
+wrap_task! {
+    struct UiTask {
+        job: Job,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            run_job(self.job);
+        }
+    }
+}
+
+thread_local! {
+    /// The loop of CEF's UI thread, from before CEF starts until its message loop quits.
+    static LOOP: RefCell<Option<Loop>> = const { RefCell::new(None) };
+}
+
+/// Where the engine stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// CEF has no browser context yet.
+    Starting,
+    /// The sandbox probe runs.
+    Probing,
+    /// The hello went out, and Partitur's views are served.
+    Serving,
+    /// The browsers are closing, and then CEF's message loop quits.
+    Closing,
+    /// CEF's message loop was asked to quit.
+    Done,
+}
+
+/// The state of CEF's UI thread: the views and where the engine stands.
+struct Loop {
+    incoming: Receiver<Command>,
+    shared: Arc<Shared>,
+    /// The views, once the context exists.
+    views: Option<Views>,
+    sandbox: bool,
+    probe: bool,
+    phase: Phase,
+    /// Whether a shutdown was asked for before the context existed.
+    stop_at_context: bool,
+    /// The exit code once the loop has quit.
+    exit: i32,
+}
+
+impl Loop {
+    fn new(incoming: Receiver<Command>, shared: Arc<Shared>, sandbox: bool, probe: bool) -> Self {
+        Self {
+            incoming,
+            shared,
+            views: None,
+            sandbox,
+            probe,
+            phase: Phase::Starting,
+            stop_at_context: false,
+            exit: 0,
+        }
+    }
+
+    fn run(&mut self, job: Job) {
+        match job {
+            Job::Drain => self.drain(),
+            Job::Context => self.context(),
+            Job::ContextLate if self.phase == Phase::Starting => {
+                tracing::error!(
+                    "CEF did not initialize its context within {CONTEXT_PATIENCE:?}; the widget \
+                     engine ends"
+                );
+                std::process::exit(1);
+            }
+            #[cfg(target_os = "linux")]
+            Job::ProbeLate if self.phase == Phase::Probing => {
+                self.probe_failed(&format!("it did not finish within {PROBE_PATIENCE:?}"));
+            }
+            Job::CloseLate if self.phase == Phase::Closing => self.quit(),
+            Job::ContextLate | Job::ProbeLate | Job::CloseLate => {}
+        }
+    }
+
+    /// Carries out every queued command.
+    fn drain(&mut self) {
+        // Cleared first, so that a command queued from here on posts another task.
+        self.shared.commands.posted.store(false, Ordering::SeqCst);
+        while let Ok(command) = self.incoming.try_recv() {
+            self.handle(command);
+        }
+    }
+
+    fn handle(&mut self, command: Command) {
+        match command {
+            Command::Shutdown => self.close(),
+            Command::Probed(outcome) => {
+                if self.phase == Phase::Probing {
+                    match outcome {
+                        Ok(()) => self.probed(),
+                        Err(reason) => self.probe_failed(&reason),
+                    }
+                }
+            }
+            // No view opens once the browsers are closing.
+            Command::Open(..) if matches!(self.phase, Phase::Closing | Phase::Done) => {}
+            command => {
+                if let Some(views) = self.views.as_mut() {
+                    views.handle(command);
+                    if self.phase == Phase::Closing && !views.has_browsers() {
+                        self.quit();
+                    }
+                }
             }
         }
     }
-}
 
-/// Gives SIGINT, SIGTERM and SIGHUP their default action back, which ends the process, after
-/// Chromium installed handlers of its own for them; see the module documentation.
-#[cfg(target_os = "linux")]
-fn restore_termination_signals() {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    /// CEF's browser context exists: installs the schemes, then runs the probe or says hello.
+    fn context(&mut self) {
+        if self.phase != Phase::Starting {
+            return;
+        }
+        self.views = Some(Views::new(Arc::clone(&self.shared)));
+        if !scheme::install(&self.shared) {
+            tracing::error!("CEF did not start: the widget schemes could not be registered");
+            self.exit = 1;
+            self.close();
+        } else if self.stop_at_context {
+            self.close();
+        } else if self.probe {
+            self.start_probe();
+        } else {
+            self.hello();
+        }
+    }
 
-    let always = Arc::new(AtomicBool::new(true));
-    for signal in [SIGINT, SIGTERM, SIGHUP] {
-        if let Err(error) = signal_hook::flag::register_conditional_default(signal, always.clone())
-        {
-            tracing::warn!(%error, signal, "a signal keeps CEF's handler");
+    /// Opens the probe's view, whose page posts a message once it runs in a sandboxed renderer.
+    fn start_probe(&mut self) {
+        self.phase = Phase::Probing;
+        self.shared.probing.store(true, Ordering::SeqCst);
+        let page = WidgetPage {
+            html: "<script>parent.postMessage({probe: true}, '*')</script>".into(),
+            csp: "default-src 'none'; script-src 'unsafe-inline'".into(),
+            theme: WidgetTheme::Light,
+        };
+        if let Some(views) = self.views.as_mut() {
+            views.handle(Command::Open(PROBE_VIEW, page));
+        }
+        #[cfg(target_os = "linux")]
+        post(Job::ProbeLate, PROBE_PATIENCE);
+    }
+
+    /// The probe's page posted its message: its view closes and the hello goes out.
+    fn probed(&mut self) {
+        if let Some(views) = self.views.as_mut() {
+            views.close(PROBE_VIEW);
+        }
+        self.hello();
+    }
+
+    /// The probe failed for `reason`: the engine shuts down and ends with [`PROBE_FAILED`].
+    fn probe_failed(&mut self, reason: &str) {
+        tracing::warn!("the sandbox probe failed: {reason}");
+        self.exit = PROBE_FAILED;
+        self.close();
+    }
+
+    /// Says hello, before anything the views report goes out.
+    fn hello(&mut self) {
+        let _ = self.shared.out.send(Out::Event(FromEngine::Hello {
+            version: VERSION,
+            sandboxed: self.sandbox,
+        }));
+        self.shared.probing.store(false, Ordering::SeqCst);
+        self.phase = Phase::Serving;
+    }
+
+    /// Closes every view and quits CEF's message loop once the browsers are gone or
+    /// [`CLOSE_PATIENCE`] ran out. Before the context exists it only remembers to.
+    fn close(&mut self) {
+        match self.phase {
+            Phase::Starting if self.views.is_none() => self.stop_at_context = true,
+            Phase::Closing | Phase::Done => {}
+            _ => {
+                self.phase = Phase::Closing;
+                let gone = self.views.as_mut().is_none_or(|views| {
+                    views.close_all();
+                    !views.has_browsers()
+                });
+                if gone {
+                    self.quit();
+                } else {
+                    post(Job::CloseLate, CLOSE_PATIENCE);
+                }
+            }
+        }
+    }
+
+    fn quit(&mut self) {
+        if self.phase != Phase::Done {
+            self.phase = Phase::Done;
+            cef::quit_message_loop();
         }
     }
 }
 
 /// The temporary folder this run's CEF cache lives in, removed when dropped.
 ///
-/// It is made fresh for every start, the sandbox probe's included, under a random name and
+/// It is made fresh for every start under a random name and
 /// with mode 0700 on Unix, and making it fails rather than take a folder that is already
 /// there. A folder an earlier run left behind, killed before it could remove it, is never
 /// taken up again, and no other user can have put one in its place.
@@ -576,7 +568,7 @@ fn settings(root: &Path, sandbox: bool) -> Result<Settings, CefError> {
     Ok(Settings {
         no_sandbox: c_int::from(!sandbox),
         browser_subprocess_path: cef_string(&exe),
-        multi_threaded_message_loop: 1,
+        multi_threaded_message_loop: 0,
         windowless_rendering_enabled: 1,
         root_cache_path: cef_string(root),
         cache_path: cef_string(&root.join("cache")),
@@ -607,29 +599,27 @@ fn resources_dir(exe: &Path) -> Option<PathBuf> {
     .find(|candidate| candidate.join("icudtl.dat").is_file())
 }
 
-// Reports on `initialized` when CEF's browser context is initialized.
+// Tells the loop, on CEF's UI thread, when CEF's browser context is initialized.
 wrap_browser_process_handler! {
-    struct WidgetBrowserProcess {
-        initialized: Sender<()>,
-    }
+    struct WidgetBrowserProcess {}
 
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
-            let _ = self.initialized.send(());
+            run_job(Job::Context);
         }
     }
 }
 
-// The application of every CEF process; in the browser process `initialized` hears when the
-// browser context is initialized.
+// The application of every CEF process; in the browser process (`browser`) it tells the loop
+// when the browser context is initialized.
 wrap_app! {
     struct WidgetApp {
-        initialized: Option<Sender<()>>,
+        browser: bool,
     }
 
     impl App {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
-            self.initialized.clone().map(WidgetBrowserProcess::new)
+            self.browser.then(WidgetBrowserProcess::new)
         }
 
         fn on_before_command_line_processing(
@@ -680,24 +670,14 @@ mod tests {
         assert_eq!(started_as(Vec::<String>::new()), Started::Other);
     }
 
-    // The adapter under `--job-run` is another program, whatever its own arguments say.
+    // What comes after a separator is another program's, whatever its own arguments say.
     #[test]
     fn arguments_after_a_separator_are_another_programs() {
         assert_eq!(
-            started_as(["--job-run", "--", "node", "agent.js", "--type=module"]),
+            started_as(["--log", "--", "node", "agent.js", "--type=module"]),
             Started::Other
         );
         assert_eq!(started_as(["--", "--type=renderer"]), Started::Other);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_probe_switch_makes_the_probe() {
-        assert_eq!(started_as([SANDBOX_PROBE]), Started::Probe);
-        assert_eq!(
-            started_as(["--job-run", "--", SANDBOX_PROBE]),
-            Started::Other
-        );
     }
 
     #[test]
@@ -716,149 +696,6 @@ mod tests {
         std::fs::write(bin.join("icudtl.dat"), b"").unwrap();
         assert_eq!(resources_dir(&exe), Some(bin));
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn sh(script: &str) -> std::process::Command {
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", script]);
-        command
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_probe_that_exits_cleanly_passes() {
-        assert_eq!(run_probe(sh("exit 0"), Duration::from_secs(10)), Ok(()));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_probe_that_fails_or_aborts_names_its_last_words() {
-        let failed = run_probe(
-            sh("echo first >&2; echo 'No usable sandbox!' >&2; exit 1"),
-            Duration::from_secs(10),
-        )
-        .unwrap_err();
-        assert!(failed.starts_with("the sandbox probe failed"), "{failed}");
-        assert!(failed.ends_with(": No usable sandbox!"), "{failed}");
-        let aborted = run_probe(sh("kill -TRAP $$"), Duration::from_secs(10)).unwrap_err();
-        assert!(aborted.contains("SIGTRAP"), "{aborted}");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_probe_that_hangs_is_stopped() {
-        let started = Instant::now();
-        let hung = run_probe(sh("exec sleep 30"), Duration::from_millis(200)).unwrap_err();
-        assert!(hung.contains("did not finish within"), "{hung}");
-        assert!(started.elapsed() < Duration::from_secs(10));
-    }
-
-    // A grandchild that holds standard error, as CEF's helpers do, dies with the probe's group.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_hung_probe_is_stopped_with_its_whole_group() {
-        // The pid goes in through a rename, so the file is either missing or whole, and the
-        // limit leaves a loaded machine ample time to start the grandchild before it expires.
-        let folder = tempfile::tempdir().unwrap();
-        let pid_file = folder.path().join("grandchild");
-        let script = format!(
-            "sleep 60 & echo $! > '{file}.tmp' && mv '{file}.tmp' '{file}'; sleep 60",
-            file = pid_file.display()
-        );
-        let started = Instant::now();
-        let hung = run_probe(sh(&script), Duration::from_secs(3)).unwrap_err();
-        assert!(hung.contains("did not finish within"), "{hung}");
-        assert!(
-            started.elapsed() < Duration::from_secs(8),
-            "{:?}",
-            started.elapsed()
-        );
-        let grandchild = std::fs::read_to_string(&pid_file).unwrap();
-        let grandchild = grandchild.trim();
-        assert!(!grandchild.is_empty(), "the pid file is empty");
-        // A killed sleep stays a zombie until it is reaped, which counts as gone.
-        let status = Path::new("/proc").join(grandchild).join("status");
-        let gone = Instant::now() + Duration::from_secs(5);
-        while std::fs::read_to_string(&status).is_ok_and(|text| !text.contains("State:\tZ"))
-            && Instant::now() < gone
-        {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let state = std::fs::read_to_string(&status).unwrap_or_default();
-        assert!(
-            state.is_empty() || state.contains("State:\tZ"),
-            "the grandchild lives on: {state}"
-        );
-    }
-
-    // One that left the group and still holds standard error delays the start only briefly.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_helper_that_left_the_group_cannot_hold_the_start_up() {
-        let started = Instant::now();
-        let hung =
-            run_probe(sh("setsid sleep 5 & sleep 60"), Duration::from_millis(200)).unwrap_err();
-        assert!(hung.contains("did not finish within"), "{hung}");
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            started.elapsed()
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_probe_that_cannot_start_says_so() {
-        let missing = run_probe(
-            std::process::Command::new("/nonexistent/partitur-probe"),
-            Duration::from_secs(1),
-        )
-        .unwrap_err();
-        assert!(
-            missing.starts_with("the sandbox probe did not start"),
-            "{missing}"
-        );
-    }
-
-    // A late context fails the start at once, and CEF is shut down only once it has its
-    // context; without one it is never shut down, which would crash it.
-    #[test]
-    fn a_late_context_fails_the_start_and_waits_on_before_shutting_down() {
-        let (initialized, context) = mpsc::channel();
-        initialized.send(()).unwrap();
-        let mut gave_up = false;
-        assert_eq!(
-            await_context(&context, Duration::from_secs(5), || gave_up = true),
-            Context::InTime
-        );
-        assert!(!gave_up);
-
-        let (initialized, context) = mpsc::channel();
-        let late = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            initialized.send(()).unwrap();
-        });
-        let given_up = Arc::new(Mutex::new(None));
-        let started = Instant::now();
-        let outcome = await_context(&context, Duration::from_millis(50), {
-            let given_up = given_up.clone();
-            move || *given_up.lock().unwrap() = Some(started.elapsed())
-        });
-        assert_eq!(outcome, Context::Late);
-        let given_up = given_up.lock().unwrap().unwrap();
-        assert!(given_up < Duration::from_millis(250), "{given_up:?}");
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        late.join().unwrap();
-
-        let (initialized, context) = mpsc::channel::<()>();
-        drop(initialized);
-        let mut gave_up = false;
-        assert_eq!(
-            await_context(&context, Duration::from_millis(50), || gave_up = true),
-            Context::Never
-        );
-        assert!(gave_up);
     }
 
     // Each start gets a fresh folder of its own, private to the user, never one that was there
@@ -915,7 +752,7 @@ mod tests {
         let root = Path::new("/tmp/partitur-cef-settings");
         let made = settings(root, true).unwrap();
         assert_eq!(made.windowless_rendering_enabled, 1);
-        assert_eq!(made.multi_threaded_message_loop, 1);
+        assert_eq!(made.multi_threaded_message_loop, 0);
         assert_eq!(made.no_sandbox, 0);
         assert_eq!(made.remote_debugging_port, 0);
         assert_eq!(

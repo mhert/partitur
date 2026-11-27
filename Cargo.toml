@@ -9,6 +9,7 @@ members = [
     "crates/partitur-iced",
     "crates/partitur-mcp",
     "crates/partitur-store",
+    "crates/partitur-widget-engine",
     "crates/partitur-widgets",
 ]
 
@@ -78,4 +79,8 @@ opt-level = 3
 
 [profile.dev.package.partitur-cef]
 # partitur-cef's handlers run on CEF's UI thread, where pointer input waits behind every paint, so they run optimised in debug builds too.
+opt-level = 3
+
+[profile.dev.package.partitur-widget-engine]
+# The helper's own code runs on CEF's UI thread too, so it runs optimised in debug builds as well.
 opt-level = 3

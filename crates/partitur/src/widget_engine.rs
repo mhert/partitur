@@ -1,30 +1,28 @@
 //! The start of the widget engine, on a thread of its own.
 //!
-//! Starting CEF takes about a second on Linux, where its sandbox probe runs first, so the
-//! binary starts it with [`Starting::spawn`] while the configuration is read and the backends
-//! start, and [`Starting::join`]s it just before the window opens. A thread that could not be
+//! Starting the widget engine can take a while, so the binary starts it with [`Starting::spawn`]
+//! while the configuration is read and the backends start, and [`Starting::join`]s it just
+//! before the window opens. A failed start is the reason, in words. A thread that could not be
 //! spawned, or that panicked, counts as a failed start. When a [`Starting`] is dropped without
 //! being joined, because the start failed before, it waits for the thread and drops what it
-//! started, so the process never exits with CEF half started.
+//! started, so the process never exits with the engine half started.
 
 use std::io;
 use std::thread::{self, JoinHandle};
 
-use partitur_cef::CefError;
-
 /// A start of the widget engine that may still run.
-pub struct Starting<T>(Option<io::Result<JoinHandle<Result<T, CefError>>>>);
+pub struct Starting<T>(Option<io::Result<JoinHandle<Result<T, String>>>>);
 
 impl<T: Send + 'static> Starting<T> {
     /// Runs `start` on the thread `cef-start`.
-    pub fn spawn(start: impl FnOnce() -> Result<T, CefError> + Send + 'static) -> Self {
+    pub fn spawn(start: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
         Self::new(thread::Builder::new().name("cef-start".into()).spawn(start))
     }
 }
 
 impl<T> Starting<T> {
     /// The start on `thread`, or the reason it could not be spawned.
-    fn new(thread: io::Result<JoinHandle<Result<T, CefError>>>) -> Self {
+    fn new(thread: io::Result<JoinHandle<Result<T, String>>>) -> Self {
         Self(Some(thread))
     }
 
@@ -32,9 +30,9 @@ impl<T> Starting<T> {
     ///
     /// # Errors
     ///
-    /// Returns what the start failed with, and [`CefError::Thread`] when its thread could not
-    /// be spawned or panicked.
-    pub fn join(mut self) -> Result<T, CefError> {
+    /// Returns what the start failed with, and why its thread failed when it could not be
+    /// spawned or panicked.
+    pub fn join(mut self) -> Result<T, String> {
         // Only `join` and `drop` take the thread, and `join` consumes the start.
         let thread = self.0.take();
         wait(thread.unwrap_or_else(|| Err(io::Error::other("joined already"))))
@@ -50,13 +48,18 @@ impl<T> Drop for Starting<T> {
 }
 
 /// Waits for `thread`, or returns why it could not be spawned.
-fn wait<T>(thread: io::Result<JoinHandle<Result<T, CefError>>>) -> Result<T, CefError> {
+fn wait<T>(thread: io::Result<JoinHandle<Result<T, String>>>) -> Result<T, String> {
     match thread {
         Ok(thread) => thread
             .join()
-            .unwrap_or_else(|_| Err(CefError::Thread("it panicked".into()))),
-        Err(error) => Err(CefError::Thread(error.to_string())),
+            .unwrap_or_else(|_| Err(thread_failed("it panicked"))),
+        Err(error) => Err(thread_failed(&error.to_string())),
     }
+}
+
+/// Why the start failed when its thread failed for `reason`.
+fn thread_failed(reason: &str) -> String {
+    format!("the widget engine's thread failed: {reason}")
 }
 
 #[cfg(test)]
@@ -72,7 +75,7 @@ mod tests {
     #[test]
     fn a_start_is_joined_with_its_outcome() {
         assert_eq!(Starting::spawn(|| Ok(7)).join(), Ok(7));
-        let failed = CefError::Initialize("no CEF".into());
+        let failed = "no CEF".to_owned();
         let refused = failed.clone();
         assert_eq!(
             Starting::<()>::spawn(move || Err(refused)).join(),
@@ -85,7 +88,7 @@ mod tests {
         let unspawned = Starting::<()>::new(Err(io::Error::other("no threads left")));
         assert_eq!(
             unspawned.join(),
-            Err(CefError::Thread("no threads left".into()))
+            Err("the widget engine's thread failed: no threads left".into())
         );
     }
 

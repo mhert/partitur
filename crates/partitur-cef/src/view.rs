@@ -1,18 +1,22 @@
 //! One windowless CEF browser per widget view, and the commands that drive them.
 //!
-//! [`Views`] lives on the `cef-main` thread and carries out every [`Command`]: it opens a browser
+//! [`Views`] lives on CEF's UI thread and carries out every [`Command`] there: it opens a browser
 //! on the view's proxy page, resizes it, hides it, forwards pointer input and delivers messages
 //! into the page, and closes it again. CEF reports back through the handlers of each view's
-//! client, on its own threads: a paint, at most 60 a second over a transparent background, copies
-//! only the rows of its dirty rectangles, in BGRA with premultiplied alpha as CEF paints them,
-//! into the picture the view's [`LatestFrame`] keeps, and is announced by a
-//! [`WidgetHostEvent::Frame`] only when the UI took what was painted before, so a fast painting
-//! page never queues more than one frame of its view and no paint converts or allocates; a
-//! change of the pointer's look becomes a [`WidgetHostEvent::Cursor`], with the looks the UI has
-//! no match for as the default arrow; a load error of the proxy page or of the widget's
-//! document, or a renderer that stopped, becomes [`WidgetHostEvent::Failed`] (frames the widget
-//! nests may fail on their own), and the creation, load and close of a browser come back to
-//! [`Views`] as commands.
+//! client: a paint, at most 60 a second over a transparent background, copies only the rows of
+//! its dirty rectangles, in BGRA with premultiplied alpha as CEF paints them, into the picture
+//! the view's [`LatestFrame`] keeps, and wakes the writer of the helper's standard output only
+//! when the writer took what was painted before, so a fast painting page never queues more than
+//! one frame of its view and no paint converts or allocates; a change of the pointer's look
+//! becomes a [`FromEngine::Cursor`], with the looks the UI has no match for as the default arrow;
+//! a load error of the proxy page or of the widget's document, or a renderer that stopped,
+//! becomes [`FromEngine::Failed`] (frames the widget nests may fail on their own), and the
+//! creation, load and close of a browser come back to [`Views`] as commands, through the queue
+//! that every command takes to the UI thread.
+//!
+//! While the sandbox probe runs, the one view open is the probe's, and none of its events goes
+//! out: a message from its page or its failure goes back to the loop as [`Command::Probed`], and
+//! everything else it reports is dropped.
 //!
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
 //! screen info and paints at logical size times scale. Messages posted before the proxy page has
@@ -28,13 +32,14 @@
 //! The proxy page and the widget's document stay in place: a navigation of either frame away
 //! from the view's own page ([`scheme::may_navigate`]) is cancelled, and so is every new window
 //! (a link with a target such as `_blank`, `window.open`, a middle click). When the user asked
-//! for it with a click, the URL is reported as a [`WidgetHostEvent::OpenLink`] for the system's
+//! for it with a click, the URL is reported as a [`FromEngine::OpenLink`] for the system's
 //! browser; a page that navigates on its own is only stopped. Frames the widget nests navigate
 //! as its policy lets them, but never to the proxy page.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::os::raw::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -54,13 +59,15 @@ use cef::{
     wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
     wrap_resource_request_handler,
 };
-use futures::channel::mpsc::UnboundedSender;
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
-    LatestFrame, Region, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
+    LatestFrame, Region, ViewId, WidgetCursor, WidgetInput, WidgetPage,
 };
+use partitur_widgets::protocol::FromEngine;
 
+use crate::engine::Commands;
 use crate::scheme::{self, Owners, Pages};
+use crate::serve::Out;
 
 /// The size a view has before its first resize, in logical pixels.
 const DEFAULT_SIZE: (u32, u32) = (300, 150);
@@ -69,7 +76,7 @@ const DEFAULT_SIZE: (u32, u32) = (300, 150);
 /// and animates as smoothly as in a browser.
 const FRAME_RATE: c_int = 60;
 
-/// What the `cef-main` thread is asked to do, by the host or by CEF's handlers.
+/// What CEF's UI thread is asked to do, by Partitur or by CEF's handlers.
 pub(crate) enum Command {
     /// Opens a view on a page.
     Open(ViewId, WidgetPage),
@@ -91,36 +98,59 @@ pub(crate) enum Command {
     Loaded(ViewId, u64),
     /// CEF is about to destroy the browser with this identifier.
     Closed(c_int),
+    /// The sandbox probe's page posted its message (`Ok`) or failed with the reason given.
+    Probed(Result<(), String>),
     /// Closes everything and shuts CEF down.
     Shutdown,
 }
 
 /// What every view's handlers share.
 pub(crate) struct Shared {
-    /// Where the host's events go.
-    pub(crate) events: UnboundedSender<WidgetHostEvent>,
-    /// The way back to the `cef-main` thread.
-    pub(crate) commands: Sender<Command>,
+    /// Where events and the wake-ups of painted views go: the writer of standard output.
+    pub(crate) out: Sender<Out>,
+    /// The way back to CEF's UI thread.
+    pub(crate) commands: Commands,
     /// The pages the scheme handlers serve.
     pub(crate) pages: Pages,
     /// The view of each live browser, which the scheme handlers check requests against.
     pub(crate) owners: Owners,
+    /// Whether the sandbox probe runs, whose view's events do not go out.
+    pub(crate) probing: AtomicBool,
 }
 
 impl Shared {
-    fn send(&self, event: WidgetHostEvent) {
-        let _ = self.events.unbounded_send(event);
+    /// Sends `event` out, or while the probe runs hands what it says about the probe back to the
+    /// loop.
+    pub(crate) fn send(&self, event: FromEngine) {
+        if self.probing.load(Ordering::SeqCst) {
+            match event {
+                FromEngine::Message { .. } => self.commands.send(Command::Probed(Ok(()))),
+                FromEngine::Failed { error, .. } => {
+                    self.commands.send(Command::Probed(Err(error)));
+                }
+                _ => {}
+            }
+            return;
+        }
+        let _ = self.out.send(Out::Event(event));
+    }
+
+    /// Wakes the writer for the picture `view` painted into `latest`, unless the probe runs.
+    fn painted(&self, view: ViewId, latest: LatestFrame) {
+        if !self.probing.load(Ordering::SeqCst) {
+            let _ = self.out.send(Out::Frame(view, latest));
+        }
     }
 
     fn fail(&self, view: ViewId, error: String) {
-        self.send(WidgetHostEvent::Failed { view, error });
+        self.send(FromEngine::Failed { view, error });
     }
 
     /// Reports `url`, which a page of `view` was kept from opening, as a link to open, when the
     /// user asked for it (`user_gesture` is 1) and there is a URL at all.
     fn hand_on(&self, view: ViewId, url: Option<String>, user_gesture: c_int) {
         if let Some(url) = url.filter(|url| user_gesture == 1 && !url.is_empty()) {
-            self.send(WidgetHostEvent::OpenLink { view, url });
+            self.send(FromEngine::OpenLink { view, url });
         }
     }
 }
@@ -149,7 +179,7 @@ fn geometry(shared: &SharedGeometry) -> Geometry {
     *shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The `cef-main` thread's record of one open view.
+/// The UI thread's record of one open view.
 struct View {
     generation: u64,
     geometry: SharedGeometry,
@@ -195,8 +225,8 @@ impl Views {
         }
     }
 
-    /// Carries out one command. [`Command::Shutdown`] belongs to the loop that calls this, and is
-    /// ignored here.
+    /// Carries out one command. [`Command::Probed`] and [`Command::Shutdown`] belong to the loop
+    /// that calls this, and are ignored here.
     pub(crate) fn handle(&mut self, command: Command) {
         match command {
             Command::Open(view, page) => self.open(view, page),
@@ -211,7 +241,7 @@ impl Views {
             Command::Closed(id) => {
                 self.live.remove(&id);
             }
-            Command::Shutdown => {}
+            Command::Probed(_) | Command::Shutdown => {}
         }
     }
 
@@ -386,7 +416,7 @@ impl Views {
         send_input(&host, &mut open.buttons, &mut open.pointer, input);
     }
 
-    fn close(&mut self, view: ViewId) {
+    pub(crate) fn close(&mut self, view: ViewId) {
         let Some(open) = self.open.remove(&view) else {
             return;
         };
@@ -433,9 +463,8 @@ fn emulate_theme(host: &BrowserHost, theme: WidgetTheme) {
     );
     features.set_dictionary(0, Some(&mut feature));
     params.set_list(Some(&CefString::from("features")), Some(&mut features));
-    // Message number 0 lets CEF number it. Called off CEF's UI thread, as `cef-main` is with
-    // the multi-threaded message loop, the method is posted there and always answers 0, so the
-    // answer says nothing.
+    // Message number 0 lets CEF number it. The answer, the number or 0 for a failure, is of no
+    // use: a theme that did not take shows as a wrong picture, and nothing can be done about it.
     let _ = host.execute_dev_tools_method(
         0,
         Some(&CefString::from("Emulation.setEmulatedMedia")),
@@ -663,8 +692,8 @@ fn region(rect: &Rect) -> Region {
 }
 
 /// Paints what CEF passed to `on_paint` into `latest`: the rows of `dirty_rects`, or of the whole
-/// view when it named none. Returns whether a [`WidgetHostEvent::Frame`] must announce it; a paint
-/// without a usable buffer is dropped.
+/// view when it named none. Returns whether the writer must be woken for it; a paint without a
+/// usable buffer is dropped.
 ///
 /// `buffer`, `width` and `height` must be exactly what CEF passed to `on_paint`, and this must be
 /// called during that call.
@@ -751,10 +780,7 @@ wrap_render_handler! {
             if type_ == PaintElementType::VIEW
                 && paint(&self.latest, buffer, width, height, dirty_rects)
             {
-                self.shared.send(WidgetHostEvent::Frame {
-                    view: self.view,
-                    latest: self.latest.clone(),
-                });
+                self.shared.painted(self.view, self.latest.clone());
             }
         }
     }
@@ -775,8 +801,7 @@ wrap_load_handler! {
             _http_status_code: c_int,
         ) {
             if frame.is_some_and(|frame| frame.is_main() == 1) {
-                let _ = self
-                    .shared
+                self.shared
                     .commands
                     .send(Command::Loaded(self.view, self.generation));
             }
@@ -817,7 +842,7 @@ wrap_life_span_handler! {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(browser.identifier(), self.view);
-                let _ = self.shared.commands.send(Command::Created(
+                self.shared.commands.send(Command::Created(
                     self.view,
                     self.generation,
                     browser.clone(),
@@ -854,8 +879,7 @@ wrap_life_span_handler! {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&browser.identifier());
-                let _ = self
-                    .shared
+                self.shared
                     .commands
                     .send(Command::Closed(browser.identifier()));
             }
@@ -985,7 +1009,7 @@ wrap_display_handler! {
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> c_int {
-            self.shared.send(WidgetHostEvent::Cursor {
+            self.shared.send(FromEngine::Cursor {
                 view: self.view,
                 cursor: cursor_of(type_),
             });

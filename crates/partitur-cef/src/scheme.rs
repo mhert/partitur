@@ -7,7 +7,7 @@
 //!
 //! `partitur-widget://view-<n>/` serves the sandbox proxy page, and a POST to
 //! `partitur-widget://view-<n>/bridge` carries one message from the widget, which becomes a
-//! [`WidgetHostEvent::Message`]. `partitur-app://view-<n>/` serves the widget's HTML under the
+//! [`FromEngine::Message`]. `partitur-app://view-<n>/` serves the widget's HTML under the
 //! `Content-Security-Policy` header taken from its [`WidgetPage`]. Every other URL of the two
 //! schemes answers 404.
 //!
@@ -35,8 +35,10 @@ use cef::{
     ResourceHandler, SchemeHandlerFactory, SchemeRegistrar, WrapSchemeHandlerFactory,
     stream_reader_create_for_handler, wrap_scheme_handler_factory,
 };
-use futures::channel::mpsc::UnboundedSender;
-use partitur_core::widget_host::{ViewId, WidgetHostEvent, WidgetPage};
+use partitur_core::widget_host::{ViewId, WidgetPage};
+use partitur_widgets::protocol::FromEngine;
+
+use crate::view::Shared;
 
 /// The scheme of the sandbox proxy page and of the bridge.
 pub(crate) const WIDGET_SCHEME: &str = "partitur-widget";
@@ -77,13 +79,10 @@ pub(crate) fn register(registrar: SchemeRegistrar) {
     }
 }
 
-/// Installs the handlers of both schemes, and returns whether CEF took both.
-pub(crate) fn install(
-    pages: &Pages,
-    owners: &Owners,
-    events: &UnboundedSender<WidgetHostEvent>,
-) -> bool {
-    let mut factory = WidgetSchemes::new(pages.clone(), owners.clone(), events.clone());
+/// Installs the handlers of both schemes, serving the pages and checking the owners `shared`
+/// holds, and returns whether CEF took both.
+pub(crate) fn install(shared: &Arc<Shared>) -> bool {
+    let mut factory = WidgetSchemes::new(Arc::clone(shared));
     [WIDGET_SCHEME, APP_SCHEME].into_iter().all(|scheme| {
         cef::register_scheme_handler_factory(
             Some(&CefString::from(scheme)),
@@ -219,9 +218,7 @@ fn body(request: &Request) -> Vec<u8> {
 
 wrap_scheme_handler_factory! {
     struct WidgetSchemes {
-        pages: Pages,
-        owners: Owners,
-        events: UnboundedSender<WidgetHostEvent>,
+        shared: Arc<Shared>,
     }
 
     impl SchemeHandlerFactory {
@@ -236,7 +233,8 @@ wrap_scheme_handler_factory! {
             let url = CefString::from(&request.url()).to_string();
             let method = CefString::from(&request.method()).to_string();
             let owner = browser.and_then(|browser| {
-                self.owners
+                self.shared
+                    .owners
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&browser.identifier())
@@ -252,12 +250,13 @@ wrap_scheme_handler_factory! {
                 ),
                 Route::Bridge(view) => {
                     if let Ok(json) = String::from_utf8(body(request)) {
-                        let _ = self.events.unbounded_send(WidgetHostEvent::Message { view, json });
+                        self.shared.send(FromEngine::Message { view, json });
                     }
                     respond(204, "No Content", "text/plain", &[], None)
                 }
                 Route::App(view) => {
                     let page = self
+                        .shared
                         .pages
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)

@@ -147,6 +147,9 @@ jobs:
           mkdir -p target/debug/locales
           find "$RUNNER_TEMP/cef" -maxdepth 1 -type f -exec cp -f {} target/debug/ \;
           cp -f "$RUNNER_TEMP/cef/locales/"* target/debug/locales/
+      # partitur-cef's render tests drive the widget engine helper, which Cargo builds for its own
+      # package's tests only, so it is built beside the test binaries first.
+      - run: cargo build -p partitur-widget-engine
       # so one run shows every crate's failures on each platform
       - run: cargo test --workspace --all-features --no-fail-fast
       # partitur-cef's render tests need a display. The run above has none, so they skip there

@@ -27,7 +27,8 @@ must_use_candidate = "allow"
 
 [dependencies]
 partitur-core.workspace = true
-futures = { workspace = true, features = ["std"] }
+# The wire protocol the widget engine speaks with Partitur.
+partitur-widgets.workspace = true
 # The cache folder of a run: a fresh, randomly named folder only the user can enter.
 tempfile.workspace = true
 thiserror.workspace = true
@@ -38,16 +39,13 @@ tracing.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cef = { version = "156", default-features = false }
 
-# Gives the termination signals their default action back once Chromium took them over.
-[target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = { version = "0.4", default-features = false }
-
 [dev-dependencies]
+# The render tests read the host's events.
+futures = { workspace = true, features = ["std"] }
 # Shows the host's warnings, such as a sandbox fallback, in the render tests' output.
 tracing-subscriber.workspace = true
 
 [[test]]
 name = "render"
-# CEF re-runs the test binary as its helper processes, so the binary needs its own `main` that
-# hands those over to CEF before anything else runs.
+# Every test drives the one helper the binary's own `main` starts, one test after the other.
 harness = false
