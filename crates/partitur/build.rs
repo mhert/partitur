@@ -1,9 +1,6 @@
 //! Build script of the `partitur` binary. When the target is Windows it embeds the application
-//! icon and the version information into the executable. When it is Linux it gives the binary
-//! the library search path where libcef is found: beside the executable, where `cef-dll-sys`
-//! puts it in a cargo build, and in `../lib/partitur`, where a package installs it with the
-//! binary in `/usr/bin`. Windows loads libcef from beside the executable without being told,
-//! and on macOS no CEF is linked. The resource compiler is reached through `winresource`, which is compiled only on a Windows
+//! icon and the version information into the executable. The binary links no CEF, which lives in
+//! the widget engine helper. The resource compiler is reached through `winresource`, which is compiled only on a Windows
 //! host (`cfg(windows)` here means the host), and the release builds natively on Windows, so a
 //! Windows target is always built on a Windows host.
 
@@ -11,12 +8,8 @@ use std::env;
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("windows") => embed_resources()?,
-        Ok("linux") => {
-            println!("cargo::rustc-link-arg-bins=-Wl,-rpath,$ORIGIN:$ORIGIN/../lib/partitur");
-        }
-        _ => {}
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_resources()?;
     }
     Ok(())
 }

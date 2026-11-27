@@ -34,10 +34,10 @@
 //!   again. Any other argument is a usage error with exit status 2.
 //! - MCP App widgets are rendered by a widget engine, which starts on a thread of its own while
 //!   the configuration is read and the backends start, and is waited for just before the window
-//!   opens. When it does not start, the reason is logged and every widget falls back to its tool
-//!   call's text; under `--smoke` that stops the start instead, except on macOS, where CEF
-//!   widgets are not supported yet. The engine is not started yet, so widgets always fall back
-//!   to text.
+//!   opens. It is the helper process `partitur-widget-engine`, found beside the executable or
+//!   in `../lib/partitur`, which runs CEF; Partitur itself links no CEF. When it does not start,
+//!   the reason is logged and every widget falls back to its tool call's text; under `--smoke`
+//!   that stops the start instead, except on macOS, where widgets are not supported yet.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog: it is scanned in the background, and a folder that cannot be
@@ -72,11 +72,12 @@ use std::time::Instant;
 use anyhow::Context;
 use directories::BaseDirs;
 use partitur_backend_acp::AcpBackend;
-use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
+use partitur_core::widget_host::{NoWidgetHost, WidgetHost};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::{HtmlOffer, ToolServer};
 use partitur_store::{DiskFiles, FileStore, FileWriter, StatePaths};
+use partitur_widgets::host::{EngineError, EngineHost};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
@@ -88,10 +89,7 @@ use crate::config::{
     resolution, resolve_at_start,
 };
 use crate::folders::Folders;
-use crate::widget_engine::Starting;
-
-/// The receiver of the widget engine's events.
-type WidgetEvents = futures::channel::mpsc::UnboundedReceiver<WidgetHostEvent>;
+use crate::widget_engine::{Events as WidgetEvents, Starting};
 
 fn main() -> ExitCode {
     let command = match cli::parse(env::args_os().skip(1)) {
@@ -150,21 +148,21 @@ fn show_error(_description: &str) {}
 ///
 /// When the engine did not start, or its thread failed, the reason is logged and no engine runs:
 /// every tool call's widget falls back to its text. Under `--smoke` that is an error where
-/// CEF is supported, so the release smoke proves the runtime loads. Only a running engine
+/// widgets are supported, so the release smoke proves the helper starts. Only a running engine
 /// switches the `show_html` tool on in `html_offer`.
 fn widget_host(
-    engine: Starting<(NoWidgetHost, WidgetEvents)>,
+    engine: Starting<(EngineHost, WidgetEvents)>,
     command: &Command,
     html_offer: &HtmlOffer,
 ) -> anyhow::Result<(Box<dyn WidgetHost>, WidgetEvents)> {
     match engine.join() {
         Ok((host, events)) => {
-            tracing::info!("the widget engine started");
+            tracing::info!(sandboxed = host.sandboxed(), "the widget engine started");
             html_offer.enable();
             Ok((Box::new(host), events))
         }
         Err(error) if needs_widgets(command, cfg!(not(target_os = "macos"))) => {
-            Err(anyhow::anyhow!(error)).context("the widget engine did not start")
+            Err(error).context("the widget engine did not start")
         }
         Err(error) => {
             tracing::warn!(%error, "widgets fall back to text: the widget engine did not start");
@@ -189,8 +187,13 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let shell_asked = shell_env::wanted(cfg!(target_os = "macos"), io::stdin().is_terminal());
     let process_env = shell_env::start(shell_asked);
     // The widget engine starts on a thread of its own while the configuration is read and the
-    // backends start. It is not started yet, so widgets fall back to text.
-    let widget_engine = Starting::spawn(|| Err("the widget engine is not started yet".to_owned()));
+    // backends start.
+    let widget_engine = Starting::spawn(|| {
+        let exe = env::current_exe().map_err(|error| {
+            EngineError::Spawn(format!("the executable's path is unknown: {error}"))
+        })?;
+        widget_engine::start(&exe)
+    });
 
     // Held until `start` returns, so a throwaway directory outlives the backend.
     let folders = Folders::open(matches!(command, Command::Smoke))?;
