@@ -75,6 +75,10 @@ pub(crate) fn protocol_output() -> io::Result<BufWriter<File>> {
 ///
 /// Never fails here.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the caller handles both platforms' versions alike, and Linux's can fail"
+)]
 pub(crate) fn protocol_output() -> io::Result<io::Stdout> {
     Ok(io::stdout())
 }
