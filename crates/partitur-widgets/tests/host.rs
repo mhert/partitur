@@ -564,12 +564,17 @@ fn an_exit_is_a_crash_while_its_output_stays_open() {
         .find_map(|line| line.strip_prefix("held "))
         .expect("the crashed engine left no child");
     assert!(!alive(&pids(&log)[0]), "the crashed engine runs on");
-    // The child it left behind is ended with its group, long before it would end on its own
-    // (it is gone once its new parent has reaped it).
+    // On Unix the child it left behind is ended with its process group, long before it would end
+    // on its own (it is gone once its new parent has reaped it). Windows has no such group:
+    // `taskkill /T` follows parent links from a running process, and the crashed engine runs no
+    // more, so its orphan ends only on its own, as `hold` does after `HOLD`. A real engine's
+    // Chromium children end when the pipes to their crashed browser process break.
+    #[cfg(unix)]
     let begun = Instant::now();
     wait_until("the child the crashed engine left behind ends", || {
         !alive(held)
     });
+    #[cfg(unix)]
     assert!(begun.elapsed() < Duration::from_secs(2));
 }
 

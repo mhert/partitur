@@ -27,7 +27,11 @@
 //! or cannot be read, or it exits unasked, that is a crash: the host reports
 //! [`WidgetHostEvent::EngineLost`], forgets every view's slot, ends the crashed helper's whole
 //! process tree (also when the helper itself has exited and been reaped: its children may run
-//! on, and a process group's id is not given to another while any member lives) and starts a new one with [`NO_PROBE`] (and [`NO_SANDBOX`] when the crashed one ran without
+//! on, and a process group's id is not given to another while any member lives; on Windows,
+//! where `taskkill /T` follows parent links from a running process, the children of a helper
+//! that has already exited are not reached and end on their own, as Chromium's do once the pipes
+//! to their browser process break) and starts a new one with
+//! [`NO_PROBE`] (and [`NO_SANDBOX`] when the crashed one ran without
 //! the sandbox), waiting [`Patience::hello`]. Its hello is reported as
 //! [`WidgetHostEvent::EngineBack`]. When that start fails, or a later helper crashes too, the
 //! host reports [`WidgetHostEvent::EngineStopped`] and starts no more. All of that happens on the
