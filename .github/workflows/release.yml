@@ -357,11 +357,13 @@ jobs:
         run: |
           apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb"
           apt-get install -y --no-install-recommends xvfb xauth weston
-          # The deb's AppArmor profile grants the widget engine the user namespaces CEF's
-          # sandbox needs, so the smoke requires the engine to start sandboxed here. The Arch
-          # and AppImage smokes leave it off: their runners may refuse user namespaces, and the
-          # engine then falls back to no sandbox with a warning.
-          PARTITUR_SMOKE_SANDBOX=1 sh scripts/smoke.sh partitur "$EXPECTED"
+          # The smokes check only that the widget engine starts, not that it is sandboxed: no
+          # release runner here grants CEF the user namespaces its sandbox needs (the deb and
+          # Arch jobs run in containers, whose seccomp profile blocks them and which load no
+          # AppArmor profile, and Ubuntu's runner restricts them through AppArmor), so the engine
+          # falls back to no sandbox with a warning. PARTITUR_SMOKE_SANDBOX=1 is for a machine
+          # that does grant them.
+          sh scripts/smoke.sh partitur "$EXPECTED"
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
         env:
