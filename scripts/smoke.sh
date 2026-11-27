@@ -97,9 +97,10 @@ check_engine() {
 }
 
 # X11. Unsetting WAYLAND_DISPLAY is what keeps winit from picking Wayland when the caller
-# happens to have a compositor.
+# happens to have a compositor. Ubuntu's xvfb-run hands the program's standard error on as its
+# standard output, so the log takes both.
 x11_log="$(mktemp)"
-if ! env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke 2>"$x11_log"; then
+if ! env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke >"$x11_log" 2>&1; then
   cat "$x11_log" >&2
   rm -f "$x11_log"
   echo "smoke: $bin --smoke failed on X11 (Xvfb)" >&2
