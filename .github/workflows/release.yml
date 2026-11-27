@@ -357,12 +357,12 @@ jobs:
         run: |
           apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb"
           apt-get install -y --no-install-recommends xvfb xauth weston
-          # The smokes check only that the widget engine starts, not that it is sandboxed: no
-          # release runner here grants CEF the user namespaces its sandbox needs (the deb and
-          # Arch jobs run in containers, whose seccomp profile blocks them and which load no
-          # AppArmor profile, and Ubuntu's runner restricts them through AppArmor), so the engine
-          # falls back to no sandbox with a warning. PARTITUR_SMOKE_SANDBOX=1 is for a machine
-          # that does grant them.
+          # This smoke checks only that the widget engine starts, not that it is sandboxed: the
+          # deb and Arch jobs run in containers, whose seccomp profile blocks the user namespaces
+          # CEF's sandbox needs and which load no AppArmor profile, so the engine falls back to
+          # no sandbox with a warning there. The AppImage job runs on the bare ubuntu-22.04
+          # runner, which still grants unprivileged user namespaces (Ubuntu restricts them only
+          # from 23.10 on), so its smoke sets PARTITUR_SMOKE_SANDBOX=1 and requires the sandbox.
           sh scripts/smoke.sh partitur "$EXPECTED"
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
@@ -587,9 +587,11 @@ jobs:
       - name: Smoke the AppImage
         # The runner is not asked to mount anything: told to extract itself and run, the
         # AppImage proves its payload without a working FUSE being part of what is
-        # tested.
+        # tested. Ubuntu 22.04 grants CEF's sandbox its user namespaces, so the smoke also
+        # requires the widget engine to run sandboxed.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          PARTITUR_SMOKE_SANDBOX: "1"
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         run: sh scripts/smoke.sh "./partitur-$VERSION-x86_64.AppImage" "$EXPECTED"
       - name: The AppImage carries the widget engine, CEF and the adapter
