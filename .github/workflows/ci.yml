@@ -55,10 +55,11 @@ jobs:
       # and Windows need nothing beyond the toolchain.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
-      # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
-      # build of cef-dll-sys at it instead of a fresh download into every build folder. macOS
-      # does not build CEF at all: widgets are not supported there yet.
+      # partitur-widget-engine, the helper that renders widgets, links CEF through partitur-cef,
+      # whose binary distribution (about 1.5 GB unpacked) is fetched once per platform with the
+      # cef-rs project's export-cef-dir and cached; CEF_PATH points the build of cef-dll-sys at
+      # it instead of a fresh download into every build folder. macOS does not build CEF at
+      # all: widgets are not supported there yet.
       - name: Cache the CEF distribution
         if: runner.os != 'macOS'
         id: cef-cache
@@ -116,10 +117,11 @@ jobs:
       # apt packages: Linux-only. xvfb is the virtual X server of partitur-cef's render tests.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev xvfb
-      # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
-      # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
-      # build of cef-dll-sys at it instead of a fresh download into every build folder. macOS
-      # does not build CEF at all: widgets are not supported there yet.
+      # partitur-widget-engine, the helper that renders widgets, links CEF through partitur-cef,
+      # whose binary distribution (about 1.5 GB unpacked) is fetched once per platform with the
+      # cef-rs project's export-cef-dir and cached; CEF_PATH points the build of cef-dll-sys at
+      # it instead of a fresh download into every build folder. macOS does not build CEF at
+      # all: widgets are not supported there yet.
       - name: Cache the CEF distribution
         if: runner.os != 'macOS'
         id: cef-cache
@@ -152,10 +154,13 @@ jobs:
       - run: cargo build -p partitur-widget-engine
       # so one run shows every crate's failures on each platform
       - run: cargo test --workspace --all-features --no-fail-fast
-      # partitur-cef's render tests need a display. The run above has none, so they skip there
-      # with a printed reason and run here under xvfb instead.
+      # partitur-cef's render tests need a display. On Linux the run above has none, so they skip
+      # there with a printed reason and run here under xvfb instead; the Windows runner has a
+      # window station of its own, and runs them here directly.
       - if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum cargo test -p partitur-cef --test render
+      - if: runner.os == 'Windows'
+        run: cargo test -p partitur-cef --test render
 
   packaging:
     name: packaging (bump script + drift guard)
@@ -251,8 +256,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-llvm-cov@0.8.7 }
-      # The measured crates take in partitur, which builds partitur-cef; the same CEF steps as in
-      # the test job, so that the run does not fetch and unpack CEF under instrumentation.
+      # The measured crates link no CEF themselves (the widget engine helper does); the same CEF
+      # steps as in the test job stay, so that the run does not fetch and unpack CEF under
+      # instrumentation should a measured crate's build take it in.
       - name: Cache the CEF distribution
         if: runner.os != 'macOS'
         id: cef-cache
@@ -299,7 +305,7 @@ jobs:
           # lines it calls uncovered; what stands in for it is the headless iced_test simulator
           # suite named in .cargo/mutants.toml, which the test lane executes.
           cargo llvm-cov -p partitur-core -p partitur-store -p partitur-git -p partitur-backend-acp \
-            -p partitur-mcp -p partitur --all-features --lcov --output-path lcov.info
+            -p partitur-mcp -p partitur-widgets -p partitur --all-features --lcov --output-path lcov.info
 
           # The lines this branch added, as "<path>:<line>", read off the plus side of every hunk
           # header. `-U0` is what makes those the changed lines rather than three lines of
@@ -375,8 +381,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-mutants@27.1.0 }
-      # The mutation run builds the whole workspace, partitur-cef with it; the same CEF steps as
-      # in the test job.
+      # The mutation run builds the whole workspace, the widget engine helper and partitur-cef
+      # with it; the same CEF steps as in the test job.
       - name: Cache the CEF distribution
         if: runner.os != 'macOS'
         id: cef-cache

@@ -47,7 +47,7 @@ prepare() {
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  CEF_PATH="$srcdir/cef" cargo build --release --locked -p partitur
+  CEF_PATH="$srcdir/cef" cargo build --release --locked -p partitur -p partitur-widget-engine
   # The pinned adapter with the widget patch. It runs on the system's nodejs, so no Node.js is
   # bundled with it.
   sh scripts/adapter-bundle.sh "$srcdir/adapter"
@@ -57,10 +57,11 @@ build() {
 package() {
   cd "$srcdir/$pkgname-$pkgver"
   install -Dm755 target/release/partitur "$pkgdir/usr/bin/partitur"
-  # CEF and the adapter in /usr/lib/partitur, where the binary's rpath finds libcef and where
-  # it looks for CEF's resources and the adapter. No chrome-sandbox is installed: CEF sandboxes
+  # The widget engine helper, CEF and the adapter in /usr/lib/partitur, where the helper's rpath
+  # finds libcef and where the program looks for the helper, CEF's resources and the adapter. No chrome-sandbox is installed: CEF sandboxes
   # its processes with unprivileged user namespaces, which Arch's kernel allows.
   install -d "$pkgdir/usr/lib/partitur"
+  install -m755 target/release/partitur-widget-engine "$pkgdir/usr/lib/partitur/partitur-widget-engine"
   cp -r --no-preserve=ownership "$srcdir/cef-runtime/." "$pkgdir/usr/lib/partitur/"
   rm "$pkgdir/usr/lib/partitur/CREDITS.html"
   cp -r --no-preserve=ownership "$srcdir/adapter" "$pkgdir/usr/lib/partitur/adapter"

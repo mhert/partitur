@@ -1,18 +1,19 @@
 # cargo-mutants scope: the full mutation gate applies to the crates whose behaviour is decidable
 # without a window — partitur-core, partitur-store, partitur-git, partitur-backend-acp,
-# partitur-mcp and the partitur binary.
+# partitur-mcp, partitur-widgets and the partitur binary.
 #
 # What the excluded crate is gated by instead:
 #
 # - partitur-iced: the GUI crate is gated by its headless `iced_test` simulator tests, which run
 #   inside `cargo test --workspace`, instead of mutation testing.
 # - crates/partitur/build.rs: embeds the icon and version info for a Windows target, which the
-#   Windows release job proves by building the exe, and sets the Linux rpath to libcef, which
-#   every start of the binary outside cargo proves, the smoke included.
+#   Windows release job proves by building the exe. The binary links no CEF, so its build script
+#   sets no rpath any more; that lives in the widget engine's own build script.
 # - partitur-cef: the CEF widget host does its work inside a running Chromium, so it is gated by
 #   its render tests (`tests/render.rs`, run under xvfb-run in CI) and its unit tests instead.
-# - partitur-widget-engine: the helper process that runs partitur-cef's engine, gated by the same
-#   render tests, which drive it.
+# - partitur-widget-engine: the helper process that runs partitur-cef's engine (its `main`, and
+#   the build script that links libcef and sets its rpath), gated by the same render tests, which
+#   drive it, and by the release smoke, which starts the packaged helper.
 # - crates/partitur-widgets/src/bin/fake-widget-engine.rs: test support, the scripted engine the
 #   host's integration tests drive; a mutant of it changes what the tests ask, not what ships,
 #   and the tests that use each script are what prove the script.

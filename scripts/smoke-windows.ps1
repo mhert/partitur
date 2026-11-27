@@ -4,7 +4,8 @@
 # Usage: scripts\smoke-windows.ps1 <partitur.exe> [expected-version] [-VersionOnly]
 #
 # With a second argument, `--version` must print exactly `partitur <expected-version>`; without
-# one it is only printed. The adapter in adapter\ beside partitur.exe is then run with the
+# one it is only printed. The widget engine helper, partitur-widget-engine.exe, must lie beside
+# partitur.exe. The adapter in adapter\ beside partitur.exe is then run with the
 # node.exe it carries by scripts\adapter-initialize.mjs, and its answer to `initialize` must
 # announce the widgets; that needs no Claude Code, so the check runs whether or not one is
 # installed. The window run is `partitur --smoke`, which opens the real window on
@@ -89,6 +90,12 @@ if ($ExpectedVersion) {
 } else {
     Write-Output 'smoke ok: --version runs (no version expected)'
 }
+
+$engine = Join-Path (Split-Path -Parent $Exe) 'partitur-widget-engine.exe'
+if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) {
+    Fail "$(Split-Path -Parent $Exe) carries no partitur-widget-engine.exe"
+}
+Write-Output 'smoke ok: the widget engine is beside the program'
 
 $adapter = Join-Path (Split-Path -Parent $Exe) 'adapter'
 $node = Join-Path $adapter 'node\node.exe'

@@ -187,9 +187,9 @@ jobs:
   #
   # Windows signing is optional and off unless the SIGNPATH_* repository variables are set; an
   # unsigned build is the normal case. When signing is configured, the Windows job signs the MSI
-  # and partitur.exe through SignPath and checks every signature with scripts/check-signature.ps1: the MSI's, the staged
-  # partitur.exe's that goes into the zip, and the installed partitur.exe's, which is the copy the
-  # MSI carried. On a release the signer must be SignPath Foundation, trusted and timestamped; on
+  # and partitur.exe and the widget engine helper through SignPath and checks every signature with
+  # scripts/check-signature.ps1: the MSI's, the staged executables that go into the zip, and the
+  # installed ones, which are the copies the MSI carried. On a release the signer must be SignPath Foundation, trusted and timestamped; on
   # a dry run it must be SignPath's test certificate. It installs its MSI silently with msiexec,
   # as a user's double-click would with its defaults, and checks what the install left: the
   # uninstall entry Settings > Apps reads, carrying the version being released, the three files,
@@ -303,7 +303,7 @@ jobs:
       - name: Build + package
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --locked -p partitur
+          cargo build --release --locked -p partitur -p partitur-widget-engine
           cargo deb -p partitur --no-build --deb-version "$VERSION"
           # Renamed right after it is built, so the distro tag is in the name before
           # anything else can pick the file up by a glob.
@@ -333,10 +333,11 @@ jobs:
             fi
           done
           exit "$missing"
-      - name: The package carries CEF and the adapter
+      - name: The package carries the widget engine, CEF and the adapter
         run: |
           deb="partitur_${VERSION}_amd64_${TAG}.deb"
           sh scripts/package-contents.sh "$deb" <<'EOF'
+          usr/lib/partitur/partitur-widget-engine
           usr/lib/partitur/libcef.so
           usr/lib/partitur/icudtl.dat
           usr/lib/partitur/v8_context_snapshot.bin
@@ -443,9 +444,10 @@ jobs:
             fi
           done
           exit "$missing"
-      - name: The package carries CEF and the adapter
+      - name: The package carries the widget engine, CEF and the adapter
         run: |
           sh scripts/package-contents.sh "partitur-$VERSION-1-x86_64.pkg.tar.zst" <<'EOF'
+          usr/lib/partitur/partitur-widget-engine
           usr/lib/partitur/libcef.so
           usr/lib/partitur/icudtl.dat
           usr/lib/partitur/v8_context_snapshot.bin
@@ -520,16 +522,17 @@ jobs:
           export-cef-dir --force --target x86_64-unknown-linux-gnu "$RUNNER_TEMP/cef"
       - name: Point the build at the CEF distribution
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked -p partitur
+      - run: cargo build --release --locked -p partitur -p partitur-widget-engine
       - name: Assemble the AppDir from the files the packages install
         # The binary, the desktop entry and the master icon, laid out as an installed
-        # system, and in usr/lib/partitur CEF's runtime and the patched adapter with the
+        # system, and in usr/lib/partitur the widget engine helper, CEF's runtime and the patched adapter with the
         # Node.js it runs on, as the packages lay them out. linuxdeploy reads the entry and the
         # icon from here.
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/lib/partitur AppDir/usr/share/applications \
             AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/doc/partitur
           cp target/release/partitur AppDir/usr/bin/partitur
+          cp target/release/partitur-widget-engine AppDir/usr/lib/partitur/partitur-widget-engine
           cp packaging/linux/mhert.partitur.desktop AppDir/usr/share/applications/
           cp packaging/linux/mhert.partitur.svg AppDir/usr/share/icons/hicolor/scalable/apps/
           sh scripts/cef-runtime.sh "$CEF_PATH" AppDir/usr/lib/partitur
@@ -548,27 +551,32 @@ jobs:
         # trusting that it packed it.
         #
         # Deploying and packing are two steps, with a repair between them. linuxdeploy copies
-        # libcef.so, which the binary links, into usr/lib with the libraries it links, and sets
-        # the binary's RUNPATH to $ORIGIN/../lib alone. CEF finds icudtl.dat, its snapshot and
-        # its .pak files beside libcef.so, so that copy would start without them; it is removed,
-        # and the binary is pointed back at usr/lib/partitur and libcef.so at the libraries
-        # linuxdeploy put one folder up.
+        # libcef.so, which the widget engine helper links (the helper is named as an executable
+        # of its own, since the program no longer links it), into usr/lib with the libraries it
+        # links. CEF finds icudtl.dat, its snapshot and its .pak files beside libcef.so, so that
+        # copy would start without them; it is removed, and so is any copy of the helper that
+        # linuxdeploy puts in usr/bin, which would find no libcef.so beside it. The helper and
+        # libcef.so in usr/lib/partitur are pointed at their own folder, where each finds the
+        # other and CEF its files, and at the libraries linuxdeploy put one folder up. The program
+        # itself links no CEF and keeps linuxdeploy's RUNPATH.
         run: |
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --executable AppDir/usr/lib/partitur/partitur-widget-engine \
             --desktop-file AppDir/usr/share/applications/mhert.partitur.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg
-          rm AppDir/usr/lib/libcef.so
+          rm -f AppDir/usr/lib/libcef.so AppDir/usr/bin/partitur-widget-engine
           # linuxdeploy bundles libnss3, which libcef links, but not the modules NSS dlopens
           # (softokn, freebl). Ubuntu's libnss3 looks for them in an nss folder beside itself,
           # where Debian keeps them; without that folder CEF aborts as it starts NSS on any
           # Debian or Ubuntu host, whose own copies sit only in that folder of the system lib.
           cp -a /usr/lib/x86_64-linux-gnu/nss AppDir/usr/lib/nss
-          patchelf --set-rpath '$ORIGIN/../lib/partitur:$ORIGIN/../lib' AppDir/usr/bin/partitur
           patchelf --set-rpath '$ORIGIN:$ORIGIN/..' AppDir/usr/lib/partitur/libcef.so
-          readelf -d AppDir/usr/bin/partitur AppDir/usr/lib/partitur/libcef.so | grep RUNPATH
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/..' AppDir/usr/lib/partitur/partitur-widget-engine
+          readelf -d AppDir/usr/bin/partitur AppDir/usr/lib/partitur/libcef.so \
+            AppDir/usr/lib/partitur/partitur-widget-engine | grep RUNPATH
           ./linuxdeploy-plugin-appimage-x86_64.AppImage --appdir AppDir
       - name: Smoke the AppImage
         # The runner is not asked to mount anything: told to extract itself and run, the
@@ -578,12 +586,13 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         run: sh scripts/smoke.sh "./partitur-$VERSION-x86_64.AppImage" "$EXPECTED"
-      - name: The AppImage carries CEF and the adapter
+      - name: The AppImage carries the widget engine, CEF and the adapter
         run: |
           work="$(mktemp -d)"
           appimage="$PWD/partitur-$VERSION-x86_64.AppImage"
           (cd "$work" && "$appimage" --appimage-extract >/dev/null)
           sh scripts/package-contents.sh "$work/squashfs-root" <<'EOF'
+          usr/lib/partitur/partitur-widget-engine
           usr/lib/partitur/libcef.so
           usr/lib/partitur/icudtl.dat
           usr/lib/partitur/v8_context_snapshot.bin
@@ -711,9 +720,10 @@ jobs:
         with: { name: "macos-${{ matrix.arch }}", path: "partitur-*-macos.tar.gz" }
 
   # Windows gets an MSI installer and a zip of the same files, for those who would rather not
-  # install: partitur.exe, LICENSE and README.md, CEF's runtime beside the program, where Windows
-  # loads libcef.dll from, and the patched adapter with its node.exe in adapter\. The C runtime is
-  # linked into partitur.exe, so there is nothing else to bundle beside it.
+  # install: partitur.exe, LICENSE and README.md, the widget engine helper
+  # partitur-widget-engine.exe and CEF's runtime beside them, where Windows loads libcef.dll from
+  # for the helper, and the patched adapter with its node.exe in adapter\. The C runtime is
+  # linked into both executables, so there is nothing else to bundle beside them.
   windows:
     needs: prepare
     runs-on: windows-2025
@@ -747,7 +757,7 @@ jobs:
       - name: Point the build at the CEF distribution
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked -p partitur
+      - run: cargo build --release --locked -p partitur -p partitur-widget-engine
       - name: Fetch Node.js for the adapter
         # Unpacked here rather than by the bundle script, which would need an unzip that Git
         # Bash does not promise; the archive is checked against nodejs.org's SHA-256 first.
@@ -758,11 +768,11 @@ jobs:
           $want = '4a191082e9706866830379d577d2cc8a50c776fcd9436a8d061b063ed0d9a0e3'
           if ($hash -ne $want) { throw "node-v$env:NODE_VERSION-win-x64.zip has SHA-256 $hash, expected $want" }
           Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'node')
-      - name: Stage the program, its documents, CEF and the adapter
+      - name: Stage the program, the widget engine, its documents, CEF and the adapter
         shell: bash
         run: |
           mkdir stage
-          cp target/release/partitur.exe LICENSE README.md stage/
+          cp target/release/partitur.exe target/release/partitur-widget-engine.exe LICENSE README.md stage/
           sh scripts/cef-runtime.sh "$(cygpath -u "$CEF_PATH")" stage
           mv stage/CREDITS.html stage/CEF-CREDITS.html
           sh scripts/adapter-bundle.sh stage/adapter \
@@ -773,12 +783,14 @@ jobs:
         # the DLL a clean Windows lacks. This runner has the runtime installed, so starting the
         # program here would succeed after a regression too; reading the imports catches it.
         run: |
-          $bytes = [IO.File]::ReadAllBytes("stage\partitur.exe")
-          $text = [Text.Encoding]::ASCII.GetString($bytes)
-          if ($text.IndexOf('VCRUNTIME140', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            throw "partitur.exe links the MSVC runtime dynamically (VCRUNTIME140.dll)"
+          foreach ($name in 'partitur.exe', 'partitur-widget-engine.exe') {
+            $bytes = [IO.File]::ReadAllBytes("stage\$name")
+            $text = [Text.Encoding]::ASCII.GetString($bytes)
+            if ($text.IndexOf('VCRUNTIME140', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+              throw "$name links the MSVC runtime dynamically (VCRUNTIME140.dll)"
+            }
+            Write-Output "stage\${name}: no VCRUNTIME140 import"
           }
-          Write-Output "stage\partitur.exe: no VCRUNTIME140 import"
       - name: Build the MSI
         # install-wix.ps1 pins the WiX version: this compiler builds an artifact that runs
         # elevated on a user's machine, so a new version must not land unreviewed.
@@ -843,13 +855,13 @@ jobs:
           Write-Output "signing: mode $mode, policy '$policy', signer '$signer', product version $exeVersion"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "mode=$mode", "policy=$policy", "signer=$signer", "exe_version=$exeVersion"
       - name: Gather the files to sign
-        # The artifact configuration expects the MSI and partitur.exe side by side at the
-        # artifact's root. Uploading the MSI and stage\partitur.exe directly would keep the
-        # stage\ folder in the artifact, so both are copied into one folder first.
+        # The artifact configuration expects the MSI, partitur.exe and the widget engine helper
+        # side by side at the artifact's root. Uploading them from stage\ directly would keep the
+        # stage\ folder in the artifact, so they are copied into one folder first.
         if: steps.signing.outputs.mode != 'none'
         run: |
           New-Item -ItemType Directory -Path unsigned | Out-Null
-          Copy-Item "partitur-$env:VERSION-x86_64-windows.msi", stage\partitur.exe -Destination unsigned
+          Copy-Item "partitur-$env:VERSION-x86_64-windows.msi", stage\partitur.exe, stage\partitur-widget-engine.exe -Destination unsigned
       - name: Upload the unsigned files for SignPath
         # SignPath fetches what it signs from a workflow artifact, so one artifact carries
         # everything one request signs. A re-run of this job uploads it again under the same name.
@@ -865,8 +877,8 @@ jobs:
           overwrite: true
           retention-days: 1
       - name: Sign through SignPath
-        # One request signs the MSI, the partitur.exe inside it and the zip's partitur.exe, so a
-        # release waits on one manual approval. The wait covers that approval; the job's timeout
+        # One request signs the MSI, the partitur.exe and helper inside it and the zip's two
+        # executables, so a release waits on one manual approval. The wait covers that approval; the job's timeout
         # is raised to match.
         if: steps.signing.outputs.mode != 'none'
         id: sign
@@ -892,15 +904,16 @@ jobs:
         run: |
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Windows signing request: $env:URL"
       - name: Use the signed files
-        # The zip is packed after this step, so it takes the signed partitur.exe from the stage.
+        # The zip is packed after this step, so it takes the signed executables from the stage.
         if: steps.signing.outputs.mode != 'none'
         run: |
           $msi = "partitur-$env:VERSION-x86_64-windows.msi"
-          foreach ($file in "signed\$msi", 'signed\partitur.exe') {
+          foreach ($file in "signed\$msi", 'signed\partitur.exe', 'signed\partitur-widget-engine.exe') {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "the signed artifact holds no $file" }
           }
           Copy-Item -LiteralPath "signed\$msi" -Destination $msi -Force
           Copy-Item -LiteralPath signed\partitur.exe -Destination stage\partitur.exe -Force
+          Copy-Item -LiteralPath signed\partitur-widget-engine.exe -Destination stage\partitur-widget-engine.exe -Force
       - name: Check the signatures
         # A release accepts only SignPath Foundation's certificate, trusted and timestamped. A
         # dry run's test certificate is not one this runner trusts, and the test policy need not
@@ -912,7 +925,7 @@ jobs:
         run: |
           $strict = @{}
           if ($env:MODE -eq 'release') { $strict = @{ RequireTrusted = $true; RequireTimestamp = $true } }
-          foreach ($file in "partitur-$env:VERSION-x86_64-windows.msi", 'stage\partitur.exe') {
+          foreach ($file in "partitur-$env:VERSION-x86_64-windows.msi", 'stage\partitur.exe', 'stage\partitur-widget-engine.exe') {
             & .\scripts\check-signature.ps1 -Path $file -Signer "$env:SIGNER" @strict
             if ($LASTEXITCODE -ne 0) { throw "the signature of $file failed its check" }
           }
@@ -924,8 +937,8 @@ jobs:
         # msiexec writes its log in UTF-16, which the job's log would show as spaced-out
         # characters, so a failed install prints it decoded to make the run diagnosable; pwsh
         # finds the encoding from the file's byte order mark. When the build was signed, the
-        # installed partitur.exe is checked as the staged one was: that proves the copy inside
-        # the MSI was signed too, which no check on the MSI itself shows.
+        # installed partitur.exe and helper are checked as the staged ones were: that proves the
+        # copies inside the MSI were signed too, which no check on the MSI itself shows.
         env:
           MODE: ${{ steps.signing.outputs.mode }}
           SIGNER: ${{ steps.signing.outputs.signer }}
@@ -942,8 +955,10 @@ jobs:
           if ($env:MODE -eq 'release' -or $env:MODE -eq 'test') {
             $strict = @{}
             if ($env:MODE -eq 'release') { $strict = @{ RequireTrusted = $true; RequireTimestamp = $true } }
-            & .\scripts\check-signature.ps1 -Path "$env:ProgramFiles\Partitur\partitur.exe" -Signer "$env:SIGNER" @strict
-            if ($LASTEXITCODE -ne 0) { throw "the signature of the installed partitur.exe failed its check" }
+            foreach ($name in 'partitur.exe', 'partitur-widget-engine.exe') {
+              & .\scripts\check-signature.ps1 -Path "$env:ProgramFiles\Partitur\$name" -Signer "$env:SIGNER" @strict
+              if ($LASTEXITCODE -ne 0) { throw "the signature of the installed $name failed its check" }
+            }
           }
       - name: Smoke the installed program
         env:
@@ -953,14 +968,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the installed program failed its smoke" }
       - name: Check the zip's contents and its program's version
         # The window was proven on the installed copy of the same build; this proves the zip
-        # holds the program, its documents, CEF and the adapter, and a program that starts.
+        # holds the program, the widget engine, its documents, CEF and the adapter, and a program
+        # that starts.
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'partitur-zip'
           Expand-Archive -Path "partitur-$env:VERSION-x86_64-windows.zip" -DestinationPath $dir
           $required = @(
-            'partitur.exe', 'LICENSE', 'README.md', 'CEF-CREDITS.html', 'libcef.dll', 'chrome_elf.dll',
+            'partitur.exe', 'partitur-widget-engine.exe', 'LICENSE', 'README.md', 'CEF-CREDITS.html', 'libcef.dll', 'chrome_elf.dll',
             'icudtl.dat', 'v8_context_snapshot.bin', 'resources.pak', 'locales\en-US.pak',
             'adapter\node\node.exe',
             'adapter\node_modules\@agentclientprotocol\claude-agent-acp\dist\index.js'

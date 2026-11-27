@@ -3,17 +3,18 @@
   The reviewed copy of the artifact configuration pasted into SignPath's web UI: SignPath signs
   by what it holds there, not by this file, so a change here only takes effect once it is pasted
   over the one in the project. It describes the workflow artifact the release's windows job
-  uploads: the MSI and the staged partitur.exe side by side at its root. One request signs all
-  three: the partitur.exe inside the MSI first, then the MSI around it, and the copy that goes
-  into the zip.
+  uploads: the MSI, the staged partitur.exe and the staged partitur-widget-engine.exe side by side at its
+  root. One request signs all five: the two executables inside the MSI first, then the MSI around
+  them, and the copies that go into the zip. The helper carries no version information, so
+  unlike partitur.exe it is not tied to a product name or version.
 
   ${version} is the version the built partitur.exe reports, which the workflow passes as the
   signing request's "version" parameter; SignPath refuses a file whose product version differs.
   On a dry run that is the version before the bump, which is what the binary carries.
 
   The inner path follows WiX's directory layout and is matched with ** rather than spelt out. That
-  it matches the program the MSI installs is proven by the release job, which checks the
-  signature of the installed partitur.exe.
+  it matches the programs the MSI installs is proven by the release job, which checks the
+  signature of the installed partitur.exe and partitur-widget-engine.exe.
 -->
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <parameters>
@@ -24,9 +25,15 @@
       <pe-file path="**/partitur.exe" product-name="Partitur" product-version="${version}">
         <authenticode-sign/>
       </pe-file>
+      <pe-file path="**/partitur-widget-engine.exe">
+        <authenticode-sign/>
+      </pe-file>
       <authenticode-sign/>
     </msi-file>
     <pe-file path="partitur.exe" product-name="Partitur" product-version="${version}">
+      <authenticode-sign/>
+    </pe-file>
+    <pe-file path="partitur-widget-engine.exe">
       <authenticode-sign/>
     </pe-file>
   </zip-file>

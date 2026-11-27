@@ -5,8 +5,8 @@
   Built by scripts\build-msi.ps1, which runs from any directory:
     wix build packaging\windows\partitur.wxs -arch x64 -acceptEula wix7 -ext WixToolset.UI.wixext
       -d Version=<version> -d Stage=<staging folder> -d LicenseRtf=<LICENSE as RTF> -o <file.msi>
-  Stage is the folder holding partitur.exe, LICENSE and README.md, and beside them CEF's runtime
-  (libcef.dll and the files it loads, locales\ included) and the patched adapter with its node.exe
+  Stage is the folder holding partitur.exe, LICENSE and README.md, and beside them the widget
+  engine helper partitur-widget-engine.exe, CEF's runtime (libcef.dll and the files it loads, locales\ included) and the patched adapter with its node.exe
   in adapter\; the icon is taken from next to this file, so no path here depends on the working
   directory.
 
@@ -85,12 +85,15 @@
     </StandardDirectory>
 
     <!-- One component per file, each the key path of its own, so each is recorded and removed
-         by itself. The three named ones keep their ids; the rest of Stage, CEF and the adapter
+         by itself. The four named ones keep their ids; the rest of Stage, CEF and the adapter
          (thousands of files under adapter\node_modules), is taken in by Files, which gives each
          file its own component in the folder it has under Stage. -->
     <ComponentGroup Id="ProgramFiles" Directory="INSTALLFOLDER">
       <Component Id="PartiturExe">
         <File Id="PartiturExe" Source="$(var.Stage)\partitur.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="PartiturWidgetEngineExe">
+        <File Id="PartiturWidgetEngineExe" Source="$(var.Stage)\partitur-widget-engine.exe" KeyPath="yes" />
       </Component>
       <Component Id="License">
         <File Id="License" Source="$(var.Stage)\LICENSE" KeyPath="yes" />
@@ -100,6 +103,7 @@
       </Component>
       <Files Include="$(var.Stage)\**">
         <Exclude Files="$(var.Stage)\partitur.exe" />
+        <Exclude Files="$(var.Stage)\partitur-widget-engine.exe" />
         <Exclude Files="$(var.Stage)\LICENSE" />
         <Exclude Files="$(var.Stage)\README.md" />
       </Files>

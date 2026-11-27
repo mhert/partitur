@@ -1,15 +1,16 @@
-# AppArmor profile of the Debian and Ubuntu package's /usr/bin/partitur.
+# AppArmor profile of the Debian and Ubuntu package's widget engine helper,
+# /usr/lib/partitur/partitur-widget-engine.
 #
 # It confines nothing (flags=(unconfined)) and only grants `userns`: CEF, which renders MCP App
-# widgets, sandboxes its processes in unprivileged user namespaces, and Ubuntu 23.10 and later
-# let a program create one only when its profile says so. Without this profile the sandbox
+# widgets inside the helper, sandboxes its processes in unprivileged user namespaces, and Ubuntu
+# 23.10 and later let a program create one only when its profile says so. Without this profile the sandbox
 # probe fails there and the widgets run without CEF's process sandbox. It is the profile Ubuntu
 # itself ships for other Chromium-based programs.
 
 abi <abi/4.0>,
 include <tunables/global>
 
-profile partitur /usr/bin/partitur flags=(unconfined) {
+profile partitur /usr/lib/partitur/partitur-widget-engine flags=(unconfined) {
   userns,
 
   # Site-specific additions and overrides. See local/README for details.

@@ -58,7 +58,7 @@ work across the repositories of a project."""
 # the ELF names them, so they are listed by hand. Leave one out and the package installs onto a
 # machine without it and then fails to open its window. git is what the git port runs.
 # Debian and Ubuntu spell every name the same, so one table stays right for both. The libraries
-# libcef.so and the bundled node link are found by `$auto` too, which reads every ELF asset, as
+# libcef.so the helper links and the bundled node link are found by `$auto` too, which reads every ELF asset, as
 # long as the build has them installed: the release job installs them and checks Depends for them.
 depends = "$auto, git, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libvulkan1, xdg-utils"
 # nodejs and npm run the Claude Code adapter through npx when no Claude Code is installed for the
@@ -66,14 +66,17 @@ depends = "$auto, git, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, li
 recommends = "nodejs, npm, xdg-desktop-portal"
 # Loads and unloads the AppArmor profile below.
 maintainer-scripts = "../../packaging/debian/"
-# The release job stages what the binary loads from /usr/lib/partitur under target/deb-stage
+# The widget engine helper (partitur-widget-engine, which links libcef) goes to /usr/lib/partitur
+# beside libcef.so, where the program looks for it and the helper's own rpath finds libcef. The
+# release job stages what the binary loads from /usr/lib/partitur under target/deb-stage
 # first: CEF's runtime (scripts/cef-runtime.sh) in lib/, the patched adapter
 # (scripts/adapter-bundle.sh) in lib/adapter/, and the Node.js it runs on in node/, since the
 # adapter needs Node.js 22, newer than Ubuntu 24.04 and Debian 13 ship. CEF's licences go to the
 # package's documents. No chrome-sandbox is installed: CEF sandboxes in user namespaces, which
-# the AppArmor profile lets it create on Ubuntu.
+# the AppArmor profile lets the helper create on Ubuntu.
 assets = [
     ["target/release/partitur", "usr/bin/partitur", "755"],
+    ["target/release/partitur-widget-engine", "usr/lib/partitur/partitur-widget-engine", "755"],
     ["../../target/deb-stage/lib/**/*", "usr/lib/partitur/", "644"],
     ["../../target/deb-stage/node/bin/node", "usr/lib/partitur/adapter/node/bin/node", "755"],
     ["../../target/deb-stage/node/LICENSE", "usr/lib/partitur/adapter/node/LICENSE", "644"],

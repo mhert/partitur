@@ -251,6 +251,7 @@ try {
     Copy-Item -LiteralPath $fake -Destination (Join-Path $stage 'partitur.exe')
     Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
+    Copy-Item -LiteralPath $fake -Destination (Join-Path $stage 'partitur-widget-engine.exe')
     # Stand-ins for CEF's runtime and the adapter, in the subfolders the real ones have, so the
     # cases install and remove a tree like the release's.
     foreach ($name in 'libcef.dll', 'locales\en-US.pak', 'adapter\node\node.exe',
