@@ -19,7 +19,12 @@
 //! everything else it reports is dropped.
 //!
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
-//! screen info and paints at logical size times scale. Messages posted before the proxy page has
+//! screen info and paints at logical size times scale. A wheel turn's amounts are logical pixels
+//! too. CEF on Windows reads them otherwise: as `WHEEL_DELTA` (120) units of a notch, each
+//! notch scrolling the system's wheel lines (vertically) or characters (horizontally) at 100/3
+//! pixels each, the result cut to whole pixels. So there each amount goes out converted
+//! ([`notch_units`]) with the settings of `HKCU\Control Panel\Desktop`, read at each turn, so
+//! that CEF scrolls by the pixels the UI asked for, as it does elsewhere. Messages posted before the proxy page has
 //! loaded wait for it. Every request a view's browser makes passes [`scheme::permitted`] first,
 //! with the depth of the frame that makes it.
 //!
@@ -513,6 +518,57 @@ fn pixel(value: f32) -> c_int {
     value.round() as c_int
 }
 
+/// The amount to hand CEF on Windows for a scroll of `pixels`, when one notch of the wheel
+/// scrolls `per_notch` lines (or characters) there. CEF scrolls `amount / 120 * per_notch *
+/// 100 / 3` pixels, cut towards zero; the amount chosen puts that half a pixel past `pixels`,
+/// away from zero, so that the cut lands on `pixels` whatever the float arithmetic's error. It is
+/// exact while a notch scrolls at most three lines, 100 pixels; beyond that each amount scrolls
+/// more than a pixel, and the scroll is the nearest CEF can make. With no lines per notch CEF
+/// scrolls by nothing, whatever it is handed.
+#[cfg(any(windows, test))]
+fn notch_units(pixels: c_int, per_notch: u32) -> c_int {
+    if pixels == 0 || per_notch == 0 {
+        return pixels;
+    }
+    // `amount = (|pixels| + 1/2) * 360 / (100 * per_notch)`, rounded to the nearest whole.
+    let lines = i64::from(per_notch);
+    let numerator = (2 * i64::from(pixels.unsigned_abs()) + 1) * 18 + 5 * lines;
+    let amount = numerator / (10 * lines);
+    c_int::try_from(amount)
+        .unwrap_or(c_int::MAX)
+        .saturating_mul(pixels.signum())
+}
+
+/// The wheel lines and characters one notch scrolls, as the user set them in Windows, each the
+/// system's default of 3 where it cannot be read.
+#[cfg(windows)]
+fn wheel_settings() -> (u32, u32) {
+    let desktop = windows_registry::CURRENT_USER.open(r"Control Panel\Desktop");
+    let setting = |name: &str| {
+        desktop
+            .as_ref()
+            .ok()
+            .and_then(|key| key.get_string(name).ok())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(3)
+    };
+    (setting("WheelScrollLines"), setting("WheelScrollChars"))
+}
+
+/// The amounts to hand CEF for a scroll of `dx` and `dy` logical pixels (see the module
+/// documentation).
+#[cfg(windows)]
+fn wheel_amounts(dx: f32, dy: f32) -> (c_int, c_int) {
+    let (lines, chars) = wheel_settings();
+    (notch_units(pixel(dx), chars), notch_units(pixel(dy), lines))
+}
+
+/// The amounts to hand CEF for a scroll of `dx` and `dy` logical pixels: the pixels themselves.
+#[cfg(not(windows))]
+fn wheel_amounts(dx: f32, dy: f32) -> (c_int, c_int) {
+    (pixel(dx), pixel(dy))
+}
+
 /// The bits of CEF's event flag `flag`, as a [`MouseEvent`]'s modifiers hold them. The
 /// Windows bindings give the flags as `i32`, the others as `u32`.
 #[cfg(windows)]
@@ -608,7 +664,8 @@ fn send_input(
         } => {
             let event = at(x, y, wheel_modifiers(*buttons, precise));
             *pointer = (event.x, event.y);
-            host.send_mouse_wheel_event(Some(&event), pixel(dx), pixel(dy));
+            let (dx, dy) = wheel_amounts(dx, dy);
+            host.send_mouse_wheel_event(Some(&event), dx, dy);
         }
         WidgetInput::Leave => {
             let event = MouseEvent {
@@ -1166,6 +1223,55 @@ mod tests {
         assert!(button(1).is_some_and(|(kind, _)| kind == MouseButtonType::MIDDLE));
         assert!(button(2).is_some_and(|(kind, _)| kind == MouseButtonType::RIGHT));
         assert!(button(3).is_none());
+    }
+
+    /// What CEF on Windows scrolls for `amount` at `per_notch` lines a notch, as
+    /// `GetUiWheelEventOffset` in its `browser_platform_delegate_native_win.cc` computes it: in
+    /// f32, cut towards zero by `gfx::Vector2d`.
+    #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn cef_windows_scroll(amount: c_int, per_notch: u32) -> c_int {
+        let pixels_per_line = 100.0_f32 / 3.0;
+        let notches = amount as f32 / 120.0;
+        (notches * (per_notch as f32 * pixels_per_line)) as c_int
+    }
+
+    // At up to three lines a notch, every amount of pixels comes out of CEF as itself; the
+    // numbers Windows CI saw without the conversion were 50 scrolling 41 and 3 scrolling 2.
+    #[test]
+    fn windows_wheel_amounts_scroll_by_their_pixels() {
+        assert_eq!(cef_windows_scroll(50, 3), 41);
+        assert_eq!(cef_windows_scroll(3, 3), 2);
+        for per_notch in 1..=3 {
+            for pixels in -1000..=1000 {
+                let amount = notch_units(pixels, per_notch);
+                assert_eq!(
+                    cef_windows_scroll(amount, per_notch),
+                    pixels,
+                    "{pixels} px at {per_notch} lines a notch went out as {amount}"
+                );
+            }
+        }
+        assert_eq!(notch_units(50, 3), 61);
+        assert_eq!(notch_units(-50, 3), -61);
+        assert_eq!(notch_units(0, 3), 0);
+        assert_eq!(notch_units(7, 0), 7);
+    }
+
+    // Past three lines a notch CEF cannot scroll by every pixel; it scrolls by the nearest it can.
+    #[test]
+    fn many_lines_a_notch_scroll_by_the_nearest_amount() {
+        for per_notch in [4, 6, 10, 100] {
+            let step = c_int::try_from(per_notch * 100 / 360 + 1).unwrap();
+            for pixels in -1000..=1000 {
+                let scrolled = cef_windows_scroll(notch_units(pixels, per_notch), per_notch);
+                assert!(
+                    (scrolled - pixels).abs() <= step,
+                    "{pixels} px at {per_notch} lines scrolled {scrolled}"
+                );
+            }
+        }
+        assert_eq!(notch_units(c_int::MAX, 1), c_int::MAX);
+        assert_eq!(notch_units(c_int::MIN, 1), -c_int::MAX);
     }
 
     #[test]

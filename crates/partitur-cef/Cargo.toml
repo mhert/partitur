@@ -44,6 +44,11 @@ cef = { version = "156", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
 
+# Reads the user's wheel settings, by which CEF on Windows scales every wheel amount it is handed,
+# so that a widget scrolls by the pixels the UI asked for.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [dev-dependencies]
 # The render tests read the host's events.
 futures = { workspace = true, features = ["std"] }
