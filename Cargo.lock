@@ -3865,7 +3865,7 @@ dependencies = [
 
 [[package]]
 name = "partitur"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-backend-acp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-cef"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cef",
  "futures",
@@ -3924,7 +3924,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "dunce",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-git"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "partitur-core",
@@ -3948,7 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-iced"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "futures",
@@ -3967,7 +3967,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "futures",
@@ -3983,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "partitur-core",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-widget-engine"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "partitur-cef",
  "partitur-widgets",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "partitur-widgets"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "partitur-core",
