@@ -35,7 +35,8 @@
   console, so it prints only when the output is redirected: `partitur --version | more`.
 - `partitur --smoke` opens the window and exits with status 0 after its first frame. It
   works on throwaway configuration and data folders in a temporary directory, removed at
-  the end, so it never reads or writes your own, and it ignores `PARTITUR_OPEN`. The release
+  the end, so it never reads or writes your own, and it ignores `PARTITUR_OPEN`. Where widgets
+  are supported it also fails if the widget engine helper does not start. The release
   jobs run it to check that an installed package starts.
 - Any other argument prints a usage line and exits with status 2.
 - On Windows an error that stops the start, such as a `config.toml` that does not parse,

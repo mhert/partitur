@@ -155,12 +155,16 @@ need:
 ### From source
 
 You need the Rust toolchain (pinned in `rust-toolchain.toml`) and the same things as above, and
-on Linux and Windows CMake and Ninja, which build CEF's C++ wrapper. The build downloads CEF
+on Linux and Windows CMake and Ninja, which build CEF's C++ wrapper. Building the helper downloads CEF
 (about 330 MB) unless `CEF_PATH` names a distribution laid out by cef-rs's `export-cef-dir`.
 
 ```sh
+cargo build -p partitur-widget-engine   # the helper that draws widgets; without it they show text
 cargo run -p partitur
 ```
+
+The widgets are drawn by the helper `partitur-widget-engine`, which Partitur starts from beside
+its own executable, so build it first (and again after pulling changes to it).
 
 `PARTITUR_OPEN=<folder>` opens a folder as a project at startup, as if it had been picked in
 the folder dialog. `RUST_LOG` filters the log
