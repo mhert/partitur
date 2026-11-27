@@ -13,7 +13,11 @@
 # its answer to `initialize` must announce the widgets. That needs no Claude Code, so the check
 # runs whether or not one is installed. Each window run is `partitur --smoke`, which opens the real window on
 # throwaway configuration and data folders and exits after the first frame, bounded by
-# `timeout` because the mode has no time limit of its own.
+# `timeout` because the mode has no time limit of its own. Its log on stderr is printed after
+# the run, and the run fails unless it says `the widget engine started`: that proves the packaged
+# widget engine helper is found and starts. With PARTITUR_SMOKE_SANDBOX=1 it must also say
+# `sandboxed=true`, which proves CEF's process sandbox works; leave it unset where the host may
+# refuse the user namespaces the sandbox needs (the helper then runs unsandboxed after a warning).
 #
 # Needs xvfb-run (for X11) and weston (for Wayland) on the PATH. Both runs draw in software
 # (ICED_BACKEND=tiny-skia): the machines this runs on have no GPU.
@@ -75,12 +79,34 @@ echo "smoke ok: the adapter announces the widgets"
 export RUST_LOG=partitur=debug
 export ICED_BACKEND=tiny-skia
 
+# Prints the log of a `--smoke` run, then fails unless it shows the widget engine started (and
+# sandboxed, when PARTITUR_SMOKE_SANDBOX=1).
+check_engine() {
+  echo "--- partitur --smoke log ($2) ---" >&2
+  cat "$1" >&2
+  echo "--- end of log ---" >&2
+  if ! grep -qF 'the widget engine started' "$1"; then
+    echo "smoke: the widget engine did not start on $2" >&2
+    exit 1
+  fi
+  if [ "${PARTITUR_SMOKE_SANDBOX:-}" = 1 ] && ! grep -F 'the widget engine started' "$1" | grep -qF 'sandboxed=true'; then
+    echo "smoke: the widget engine started without its sandbox on $2" >&2
+    exit 1
+  fi
+  echo "smoke ok: the widget engine starts on $2"
+}
+
 # X11. Unsetting WAYLAND_DISPLAY is what keeps winit from picking Wayland when the caller
 # happens to have a compositor.
-if ! env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke; then
+x11_log="$(mktemp)"
+if ! env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke 2>"$x11_log"; then
+  cat "$x11_log" >&2
+  rm -f "$x11_log"
   echo "smoke: $bin --smoke failed on X11 (Xvfb)" >&2
   exit 1
 fi
+check_engine "$x11_log" "X11"
+rm -f "$x11_log"
 echo "smoke ok: X11 (Xvfb)"
 
 # Wayland, under weston's headless backend in a runtime directory of its own, so neither the
@@ -123,9 +149,11 @@ while [ ! -S "$runtime/partitur-smoke" ]; do
 done
 
 if ! env -u DISPLAY XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=partitur-smoke \
-  timeout 30 "$bin" --smoke; then
+  timeout 30 "$bin" --smoke 2>"$runtime/partitur.log"; then
+  cat "$runtime/partitur.log" >&2
   echo "smoke: $bin --smoke failed on Wayland; weston's log follows" >&2
   cat "$runtime/weston.log" >&2
   exit 1
 fi
+check_engine "$runtime/partitur.log" "Wayland" || exit 1
 echo "smoke ok: Wayland (weston headless)"

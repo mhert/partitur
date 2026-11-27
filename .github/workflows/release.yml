@@ -357,7 +357,11 @@ jobs:
         run: |
           apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb"
           apt-get install -y --no-install-recommends xvfb xauth weston
-          sh scripts/smoke.sh partitur "$EXPECTED"
+          # The deb's AppArmor profile grants the widget engine the user namespaces CEF's
+          # sandbox needs, so the smoke requires the engine to start sandboxed here. The Arch
+          # and AppImage smokes leave it off: their runners may refuse user namespaces, and the
+          # engine then falls back to no sandbox with a warning.
+          PARTITUR_SMOKE_SANDBOX=1 sh scripts/smoke.sh partitur "$EXPECTED"
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
         env:

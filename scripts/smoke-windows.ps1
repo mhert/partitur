@@ -11,8 +11,9 @@
 # installed. The window run is `partitur --smoke`, which opens the real window on
 # throwaway configuration and data folders and exits after the first frame. It passes only if it
 # exits with status 0 within 30 s and its log says `opening the window`; its log is printed
-# either way. -VersionOnly stops after the `--version` and adapter checks, for a second copy of
-# the same build whose window was already proven.
+# either way, and it must say `the widget engine started`. -VersionOnly stops after the
+# `--version` and adapter checks, for a second copy of the same build whose window was already
+# proven.
 #
 # partitur.exe is a GUI program with no console of its own: it writes to stdout and stderr only
 # when they are redirected, so every run here goes through Start-Process with both redirected
@@ -143,6 +144,13 @@ if (-not $run.Stderr.Contains('opening the window')) {
     Fail "$Exe --smoke exited without logging 'opening the window'"
 }
 Write-Output 'smoke ok: the window opened and closed'
+# The log is the run's own stderr, so the widget engine helper's start is read from it. Windows
+# has no process sandbox in this stage, so its line says sandboxed=false; only the start is
+# required.
+if (-not $run.Stderr.Contains('the widget engine started')) {
+    Fail "$Exe --smoke exited without logging 'the widget engine started'"
+}
+Write-Output 'smoke ok: the widget engine started'
 # Said outright: nothing above ran a native command on success, so a caller reading
 # $LASTEXITCODE would otherwise find nothing there.
 exit 0
