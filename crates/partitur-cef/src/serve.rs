@@ -269,6 +269,8 @@ mod tests {
             sandboxed: true,
         };
         if std::env::var_os(REDIRECT_CHILD).is_some() {
+            let protocol = std::fs::read_link("/proc/self/fd/1").unwrap();
+            eprintln!("protocol on {}", protocol.display());
             let mut output = protocol_output().unwrap();
             io::stdout().write_all(b"stray from the helper\n").unwrap();
             io::stdout().flush().unwrap();
@@ -307,13 +309,28 @@ mod tests {
         );
         assert!(stderr.contains("stray from the helper"), "{stderr}");
         assert!(stderr.contains("stray from a child"), "{stderr}");
-        // The child holds fds 0, 1 and 2 and the one `ls` reads; never the protocol's pipe on a
-        // fourth descriptor.
-        let pipes = stderr
+        // The child holds no descriptor of the protocol's pipe. Other pipes it may hold: whatever
+        // the test binary inherited without close-on-exec (a CI runner's, say) passes on to it.
+        let protocol = stderr
             .lines()
-            .filter(|line| line.contains("-> pipe:"))
-            .count();
-        assert_eq!(pipes, 2, "the child holds a third pipe: {stderr}");
+            .find_map(|line| line.strip_prefix("protocol on "))
+            .expect("the helper names its protocol's pipe");
+        assert!(protocol.starts_with("pipe:["), "{stderr}");
+        let held: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.contains(" -> ") && line.ends_with(protocol))
+            .collect();
+        assert!(held.is_empty(), "the child holds the protocol: {held:?}");
+        let stdout_and_stderr = |line: &&str| line.contains(" 1 -> ") || line.contains(" 2 -> ");
+        let stderr_pipe: Vec<&str> = stderr
+            .lines()
+            .filter(stdout_and_stderr)
+            .filter_map(|line| line.split(" -> ").nth(1))
+            .collect();
+        assert!(
+            matches!(stderr_pipe.as_slice(), [one, two] if one == two),
+            "fd 1 and 2 of the child are not the same standard error: {stderr}"
+        );
     }
 
     // The writer stops at the first write that fails, as when Partitur is gone: it returns
