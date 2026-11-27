@@ -2,10 +2,15 @@
 //!
 //! The tests drive the real widget engine, the `partitur-widget-engine` helper, through
 //! [`EngineHost`], as Partitur does. Cargo hands a package's tests the path of that package's own
-//! binaries only, and artifact dependencies are not stable, so the helper is looked for beside the
-//! folder of this test binary (`target/<profile>/`, where Cargo puts binaries and CEF's runtime)
-//! and has to be built first: `cargo build -p partitur-widget-engine`, as CI does. One helper
-//! serves every test, each on a view of its own, which keeps the run to one CEF start.
+//! binaries only, and artifact dependencies are not stable. So before anything else the binary
+//! runs `cargo build -p partitur-widget-engine` itself, with the Cargo that built it, into the
+//! target folder and profile it was built in, and fails when that build fails. The helper runs all
+//! of `partitur-cef`'s engine code, so a helper left over from before an edit would test old code;
+//! building it each time rules that out, and costs nothing when it is up to date. Cargo releases
+//! its build lock before it runs the tests, so this build does not wait on the `cargo test` that
+//! started it. The helper is then found beside the folder of this test binary
+//! (`target/<profile>/`, where Cargo puts binaries and CEF's runtime). One helper serves every
+//! test, each on a view of its own, which keeps the run to one CEF start.
 //!
 //! On Linux the tests need a display: without `DISPLAY` or `WAYLAND_DISPLAY` they are skipped with
 //! a printed reason, and CI runs them under `xvfb-run`. On macOS, where CEF widgets are not
@@ -85,20 +90,19 @@ fn main() -> ExitCode {
     }
 }
 
-/// The helper's executable: in the folder above this test binary's `deps`, where Cargo builds
-/// the workspace's binaries.
+/// The helper's executable, built afresh: in the folder above this test binary's `deps`, where
+/// Cargo builds the workspace's binaries.
 fn helper() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|error| format!("no path to the tests: {error}"))?;
-    let program = exe
+    let profile_dir = exe
         .parent()
         .and_then(std::path::Path::parent)
-        .map(|dir| {
-            dir.join(format!(
-                "partitur-widget-engine{}",
-                std::env::consts::EXE_SUFFIX
-            ))
-        })
         .ok_or_else(|| format!("no folder above {}", exe.display()))?;
+    build_helper(profile_dir)?;
+    let program = profile_dir.join(format!(
+        "partitur-widget-engine{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     if program.is_file() {
         Ok(program)
     } else {
@@ -107,6 +111,57 @@ fn helper() -> Result<PathBuf, String> {
             program.display()
         ))
     }
+}
+
+/// Builds the helper with the Cargo that built this binary, into `profile_dir`: the target
+/// folder above it and the profile it is named after (the `test` profile builds into `debug`).
+fn build_helper(profile_dir: &std::path::Path) -> Result<(), String> {
+    let mut build = std::process::Command::new(env!("CARGO"));
+    build
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["build", "-p", "partitur-widget-engine"]);
+    // What Cargo sets for this test's own package would reach build scripts that watch it (ring
+    // watches `CARGO_PKG_NAME`), so they would run again here and again in the next `cargo test`.
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if is_set_for_the_test(&name) {
+            build.env_remove(name.as_ref());
+        }
+    }
+    if let Some(target_dir) = profile_dir.parent() {
+        build.arg("--target-dir").arg(target_dir);
+    }
+    match profile_dir.file_name().and_then(|name| name.to_str()) {
+        Some("debug") | None => {}
+        Some(profile) => {
+            build.args(["--profile", profile]);
+        }
+    }
+    let status = build
+        .status()
+        .map_err(|error| format!("cargo could not be run to build the widget engine: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("the widget engine did not build ({status})"))
+    }
+}
+
+/// Whether Cargo sets the environment variable `name` for this test's own package when it runs
+/// the test, as it does for each package it builds.
+fn is_set_for_the_test(name: &str) -> bool {
+    name.starts_with("CARGO_PKG_")
+        || [
+            "CARGO_MANIFEST_DIR",
+            "CARGO_MANIFEST_PATH",
+            "CARGO_MANIFEST_LINKS",
+            "CARGO_CRATE_NAME",
+            "CARGO_BIN_NAME",
+            "CARGO_PRIMARY_PACKAGE",
+            "CARGO_TARGET_TMPDIR",
+            "OUT_DIR",
+        ]
+        .contains(&name)
 }
 
 /// Every test, by name.
