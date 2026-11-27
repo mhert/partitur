@@ -8,7 +8,18 @@
 //! still running then ends itself with exit code 0. So the helper never outlives Partitur, even
 //! when CEF hangs.
 //!
-//! The writer, `widget-engine-out`, owns standard output and writes what it is handed ([`Out`]),
+//! The protocol does not stay on file descriptor 1. Every process CEF starts (the zygote, the
+//! utility processes and the renderers forked from the zygote) inherits it, and a single stray
+//! write there from Chromium or a library it loads would land between two messages and read as a
+//! crash. So on Linux, before CEF starts, [`protocol_output`] moves the protocol onto a duplicate
+//! of standard output that is closed on exec, which no child inherits, and points descriptor 1 at
+//! standard error, whose lines Partitur hands on to its log. On Windows the writer keeps the
+//! standard output handle: redirecting it there takes `SetStdHandle`, a foreign call the crate's
+//! lints keep out, and Chromium starts its children with an explicit list of the handles they
+//! inherit rather than with all inheritable ones. Redirecting it there is left for when the
+//! Windows engine moves behind CEF's bootstrap executable.
+//!
+//! The writer, `widget-engine-out`, owns the protocol output and writes what it is handed ([`Out`]),
 //! in order, each message flushed as it goes. Events go out as they are. A painted view only
 //! wakes it, once per picture the writer has not taken yet: it then takes the view's damage and
 //! writes the damaged regions of the picture as they are by then, copied under the slot's lock
@@ -17,6 +28,10 @@
 //! throttles the helper instead of queueing frames. The writer ends on [`Out::End`] or when
 //! Partitur's end of the pipe is gone.
 
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::BufWriter;
 use std::io::{self, BufReader, Read, Write};
 use std::sync::mpsc::Receiver;
 use std::thread::{self, JoinHandle};
@@ -39,11 +54,39 @@ pub(crate) enum Out {
     End,
 }
 
-/// Starts the writer of standard output, which writes what `outgoing` hands it.
-pub(crate) fn writer(outgoing: Receiver<Out>) -> io::Result<JoinHandle<()>> {
+/// Where the protocol goes: on Linux a duplicate of standard output that is closed on exec, with
+/// descriptor 1 then pointed at standard error, so that no process CEF starts can write into the
+/// protocol. It must run once, before CEF starts.
+///
+/// # Errors
+///
+/// Fails when standard output cannot be duplicated or descriptor 1 not redirected.
+#[cfg(target_os = "linux")]
+pub(crate) fn protocol_output() -> io::Result<BufWriter<File>> {
+    let protocol = rustix::io::fcntl_dupfd_cloexec(io::stdout(), 3)?;
+    io::stdout().flush()?;
+    rustix::stdio::dup2_stdout(io::stderr())?;
+    Ok(BufWriter::new(File::from(protocol)))
+}
+
+/// Where the protocol goes: standard output itself (see the module documentation).
+///
+/// # Errors
+///
+/// Never fails here.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn protocol_output() -> io::Result<io::Stdout> {
+    Ok(io::stdout())
+}
+
+/// Starts the writer of the protocol output `output`, which writes what `outgoing` hands it.
+pub(crate) fn writer(
+    mut output: impl Write + Send + 'static,
+    outgoing: Receiver<Out>,
+) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("widget-engine-out".into())
-        .spawn(move || write_out(&mut io::stdout().lock(), &outgoing))
+        .spawn(move || write_out(&mut output, &outgoing))
 }
 
 /// Starts the reader of standard input, which queues each command on `commands`. It is never
@@ -206,6 +249,71 @@ mod tests {
             ]
         );
         assert!(latest.take().is_none());
+    }
+
+    /// Set in the copy of the test binary that [`the_protocol_leaves_fd_1_to_stray_writes`] runs.
+    #[cfg(target_os = "linux")]
+    const REDIRECT_CHILD: &str = "PARTITUR_CEF_TEST_REDIRECT_CHILD";
+
+    // Once the protocol has moved, a stray write to fd 1, by the helper or by a process it starts
+    // (which inherits fd 1 but not the protocol's descriptor), ends up on standard error, and the
+    // protocol carries only its messages. The test runs itself again as a child process, so that
+    // the redirect does not touch the test harness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_protocol_leaves_fd_1_to_stray_writes() {
+        use std::process::{Command, Stdio};
+
+        let hello = FromEngine::Hello {
+            version: 1,
+            sandboxed: true,
+        };
+        if std::env::var_os(REDIRECT_CHILD).is_some() {
+            let mut output = protocol_output().unwrap();
+            io::stdout().write_all(b"stray from the helper\n").unwrap();
+            io::stdout().flush().unwrap();
+            let child = Command::new("sh")
+                .args(["-c", "echo stray from a child; ls -l /proc/self/fd >&2"])
+                .status()
+                .unwrap();
+            assert!(child.success());
+            write_from_engine(&mut output, &hello).unwrap();
+            output.flush().unwrap();
+            return;
+        }
+        let run = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "serve::tests::the_protocol_leaves_fd_1_to_stray_writes",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(REDIRECT_CHILD, "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stderr}");
+        let mut expected = Vec::new();
+        write_from_engine(&mut expected, &hello).unwrap();
+        assert!(
+            run.stdout.ends_with(&expected),
+            "the protocol carried more than its message: {:?}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+        assert!(
+            !String::from_utf8_lossy(&run.stdout).contains("stray from"),
+            "a stray write reached the protocol"
+        );
+        assert!(stderr.contains("stray from the helper"), "{stderr}");
+        assert!(stderr.contains("stray from a child"), "{stderr}");
+        // The child holds fds 0, 1 and 2 and the one `ls` reads; never the protocol's pipe on a
+        // fourth descriptor.
+        let pipes = stderr
+            .lines()
+            .filter(|line| line.contains("-> pipe:"))
+            .count();
+        assert_eq!(pipes, 2, "the child holds a third pipe: {stderr}");
     }
 
     // The writer stops at the first write that fails, as when Partitur is gone: it returns

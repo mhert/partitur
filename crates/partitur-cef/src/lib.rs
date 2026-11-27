@@ -21,6 +21,9 @@
 //! left for later. The widget isolation inside Chromium (origins, the frame sandbox, the request
 //! and navigation rules) holds there all the same.
 //!
+//! The protocol keeps CEF's child processes out: on Linux it moves off file descriptor 1 before
+//! CEF starts (see the `serve` module).
+//!
 //! On Linux and Windows the work is done by the `engine`, `serve`, `view` and `scheme` modules.
 //! macOS is not supported yet: CEF there needs an `NSApplication` that speaks CEF's protocol and
 //! separate helper app bundles. So on macOS the `engine` module is a stub

@@ -185,8 +185,15 @@ pub(crate) fn serve(sandbox: bool, probe: bool) -> i32 {
             return 1;
         }
     };
+    let output = match serve::protocol_output() {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::error!("the widget engine's protocol output could not be set up: {error}");
+            return 1;
+        }
+    };
     let (out, outgoing) = mpsc::channel();
-    let writer = match serve::writer(outgoing) {
+    let writer = match serve::writer(output, outgoing) {
         Ok(writer) => writer,
         Err(error) => {
             tracing::error!("the widget engine's output has no thread: {error}");

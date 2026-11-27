@@ -39,6 +39,11 @@ tracing.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cef = { version = "156", default-features = false }
 
+# Moves the protocol off standard output before CEF starts, so that CEF's child processes, which
+# inherit standard output, cannot write into it.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 # The render tests read the host's events.
 futures = { workspace = true, features = ["std"] }

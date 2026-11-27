@@ -3914,6 +3914,7 @@ dependencies = [
  "futures",
  "partitur-core",
  "partitur-widgets",
+ "rustix 1.1.6",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
